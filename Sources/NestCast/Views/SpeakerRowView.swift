@@ -19,27 +19,36 @@ public struct SpeakerRowView: View {
     }
     
     public var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: isConnected ? "speaker.wave.3.fill" : "speaker.wave.2")
-                .font(.system(size: 16))
-                .foregroundColor(isConnected ? .accentColor : .primary)
-                .frame(width: 24)
+        HStack(spacing: 10) {
+            // Speaker Icon Badge
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isConnected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.12))
+                    .frame(width: 28, height: 28)
+                
+                Image(systemName: isConnected ? "speaker.wave.3.fill" : "speaker.wave.2")
+                    .font(.system(size: 13))
+                    .foregroundColor(isConnected ? .accentColor : .primary)
+            }
             
+            // Name & Subtitle
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: isConnected ? .semibold : .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
                 
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Text(device.model)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     
                     if let ip = device.ipAddress {
                         Text("•")
-                            .font(.system(size: 9))
+                            .font(.system(size: 8))
                             .foregroundColor(.secondary)
                         Text(ip)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -47,27 +56,36 @@ public struct SpeakerRowView: View {
             
             Spacer()
             
-            Button(action: onTestChime) {
-                Image(systemName: "bell.fill")
-                    .font(.system(size: 11))
+            // Action Buttons
+            HStack(spacing: 6) {
+                Button(action: onTestChime) {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Play test chime on speaker")
+                
+                if isConnected {
+                    Button(action: onSelect) {
+                        Text("Active")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                } else {
+                    Button(action: onSelect) {
+                        Text("Cast")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
-            .buttonStyle(.borderless)
-            .help("Play test chime on speaker")
-            
-            Button(action: onSelect) {
-                Text(isConnected ? "Active" : "Cast")
-                    .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(isConnected ? Color.accentColor : Color.secondary.opacity(0.2))
-                    .foregroundColor(isConnected ? .white : .primary)
-                    .cornerRadius(5)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 8)
-        .background(isConnected ? Color.accentColor.opacity(0.08) : Color.clear)
+        .background(isConnected ? Color.accentColor.opacity(0.06) : Color.clear)
         .cornerRadius(6)
     }
 }

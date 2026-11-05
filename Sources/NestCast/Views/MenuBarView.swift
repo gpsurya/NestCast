@@ -19,15 +19,15 @@ public struct MenuBarView: View {
     }
     
     public var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Header
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header Bar
+            HStack(spacing: 8) {
                 Image(systemName: "airplayaudio")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.accentColor)
                 
                 Text("NestCast")
-                    .font(.system(size: 15, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
                 
                 Spacer()
                 
@@ -40,7 +40,7 @@ public struct MenuBarView: View {
                         discovery.refresh()
                     }) {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 12))
+                            .font(.system(size: 11))
                     }
                     .buttonStyle(.borderless)
                     .help("Rescan Wi-Fi for speakers")
@@ -48,13 +48,35 @@ public struct MenuBarView: View {
             }
             .padding(.bottom, 2)
             
-            // System Audio Bridge Switcher
+            // Now Casting Card (if an active direct session is ongoing)
+            if cast.activeDevice != nil {
+                ActiveSessionView(
+                    cast: cast,
+                    onTestChime: {
+                        if let dev = cast.activeDevice {
+                            handleTestChime(dev)
+                        }
+                    },
+                    onDisconnect: {
+                        cast.disconnect()
+                    }
+                )
+            }
+            
+            // System Audio Bridge Card
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("System Audio Bridge")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(bridge.isRunning ? "Nest available in macOS Sound Settings" : "Stream entire Mac system audio to Nest")
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("System Audio Bridge")
+                                .font(.system(size: 12, weight: .semibold))
+                            
+                            Circle()
+                                .fill(bridge.isRunning ? Color.green : Color.secondary.opacity(0.4))
+                                .frame(width: 7, height: 7)
+                        }
+                        
+                        Text(bridge.isRunning ? "Nest visible in macOS Sound Settings" : "Route entire Mac sound to Nest via AirPlay")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -75,25 +97,15 @@ public struct MenuBarView: View {
                     .labelsHidden()
                 }
             }
-            .padding(8)
-            .background(bridge.isRunning ? Color.green.opacity(0.1) : Color.secondary.opacity(0.08))
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
             .cornerRadius(8)
-            
-            // Active direct Cast Session
-            if cast.activeDevice != nil {
-                ActiveSessionView(
-                    cast: cast,
-                    onDisconnect: {
-                        cast.disconnect()
-                    }
-                )
-            }
             
             // Discovered Speakers Section
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("SPEAKERS (\(discovery.devices.count))")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.secondary)
                     
                     Spacer()
@@ -106,14 +118,14 @@ public struct MenuBarView: View {
                 }
                 
                 if discovery.devices.isEmpty {
-                    HStack(spacing: 8) {
+                    VStack(spacing: 6) {
                         ProgressView()
                             .scaleEffect(0.7)
-                        Text("Searching for Google Nest Mini...")
-                            .font(.system(size: 12))
+                        Text("Searching for Google Nest Minis...")
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
                 } else {
                     VStack(spacing: 4) {
@@ -134,11 +146,12 @@ public struct MenuBarView: View {
             }
             
             Divider()
+                .opacity(0.6)
             
             // Footer
             HStack {
                 Text("v1.0.0 • gpsurya")
-                    .font(.system(size: 10))
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
                 
                 Spacer()
@@ -151,10 +164,11 @@ public struct MenuBarView: View {
                 }
                 .font(.system(size: 11))
                 .buttonStyle(.borderless)
+                .keyboardShortcut("q", modifiers: .command)
             }
         }
-        .padding(14)
-        .frame(width: 320)
+        .padding(12)
+        .frame(width: 310)
     }
     
     private func handleSpeakerSelect(_ device: CastDevice) {

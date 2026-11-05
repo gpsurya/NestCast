@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-public enum CastState {
+public enum CastState: Equatable {
     case disconnected
     case connecting
     case connected
@@ -20,6 +20,7 @@ public class CastProtocol: ObservableObject {
     
     private var connection: NWConnection?
     private var heartbeatTimer: Timer?
+    private var volumeDebounceTimer: Timer?
     private var requestId: Int = 1
     
     public init() {}
@@ -34,6 +35,7 @@ public class CastProtocol: ObservableObject {
         }
         
         self.activeDevice = device
+        self.currentVolume = device.volume
         self.state = .connecting
         
         let tlsOpts = NWProtocolTLS.Options()
@@ -57,6 +59,7 @@ public class CastProtocol: ObservableObject {
                     self.state = .connected
                     self.startHeartbeat()
                     self.sendConnect(destination: "receiver-0")
+                    self.sendGetStatus(destination: "receiver-0")
                     
                     if let stream = streamURL {
                         self.launchAndLoad(streamURL: stream, completion: completion)
@@ -82,6 +85,8 @@ public class CastProtocol: ObservableObject {
     public func disconnect() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
+        volumeDebounceTimer?.invalidate()
+        volumeDebounceTimer = nil
         
         if let transportId = currentTransportId {
             sendStop(transportId: transportId)
@@ -97,17 +102,33 @@ public class CastProtocol: ObservableObject {
     
     public func setVolume(level: Float) {
         let clamped = max(0.0, min(1.0, level))
-        let payload: [String: Any] = [
-            "type": "SET_VOLUME",
-            "volume": ["level": clamped],
-            "requestId": nextRequestId()
-        ]
-        sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
-        
+        // Immediate local state update so UI slider and percentage respond instantly
+        self.currentVolume = clamped
         if var dev = activeDevice {
             dev.volume = clamped
             activeDevice = dev
         }
+        
+        // Debounce socket writes to 20Hz while dragging
+        volumeDebounceTimer?.invalidate()
+        volumeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                let payload: [String: Any] = [
+                    "type": "SET_VOLUME",
+                    "volume": ["level": clamped],
+                    "requestId": self.nextRequestId()
+                ]
+                self.sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
+            }
+        }
+    }
+    
+    public func sendGetStatus(destination: String = "receiver-0") {
+        sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.receiver", dict: [
+            "type": "GET_STATUS",
+            "requestId": nextRequestId()
+        ])
     }
     
     public func launchAndLoad(streamURL: String, completion: ((Bool) -> Void)? = nil) {
@@ -120,7 +141,6 @@ public class CastProtocol: ObservableObject {
         
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
-        // Wait for RECEIVER_STATUS to arrive with transportId, or timeout after 5s
         Task {
             for _ in 0..<25 {
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -200,32 +220,56 @@ public class CastProtocol: ObservableObject {
     
     private func parseIncomingPacket(_ data: Data) {
         guard data.count > 4 else { return }
-        
         let payload = data.advanced(by: 4)
         guard let text = String(data: payload, encoding: .utf8) ?? String(data: payload, encoding: .isoLatin1) else { return }
         
-        guard let startIdx = text.range(of: "{\"")?.lowerBound,
-              let endIdx = text.range(of: "}", options: .backwards)?.upperBound else { return }
-        
-        let jsonSub = text[startIdx..<endIdx]
-        guard let jsonData = jsonSub.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
-        
-        handleJsonMessage(dict)
+        // Find all JSON object candidates in the packet
+        var searchRange = text.startIndex..<text.endIndex
+        while let startIdx = text.range(of: "{\"type\":", range: searchRange)?.lowerBound ?? text.range(of: "{\"", range: searchRange)?.lowerBound {
+            guard let endIdx = text.range(of: "}", options: .backwards, range: startIdx..<text.endIndex)?.upperBound else { break }
+            let jsonSub = text[startIdx..<endIdx]
+            if let jsonData = jsonSub.data(using: .utf8),
+               let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                handleJsonMessage(dict)
+                break
+            }
+            if endIdx < text.endIndex {
+                searchRange = endIdx..<text.endIndex
+            } else {
+                break
+            }
+        }
     }
     
-    private func handleJsonMessage(_ dict: [String: Any]) {
-        guard let type = dict["type"] as? String else { return }
-        
-        if type == "RECEIVER_STATUS",
-           let status = dict["status"] as? [String: Any],
-           let apps = status["applications"] as? [[String: Any]],
-           let firstApp = apps.first {
-            if let transportId = firstApp["transportId"] as? String {
-                self.currentTransportId = transportId
+    public func handleJsonMessage(_ dict: [String: Any]) {
+        // 1. Parse Volume updates from RECEIVER_STATUS or multizone
+        if let status = dict["status"] as? [String: Any] {
+            if let volDict = status["volume"] as? [String: Any],
+               let lvl = volDict["level"] as? Double {
+                let floatLvl = Float(lvl)
+                self.currentVolume = floatLvl
+                if var dev = self.activeDevice {
+                    dev.volume = floatLvl
+                    self.activeDevice = dev
+                }
             }
-            if let sessionId = firstApp["sessionId"] as? String {
-                self.currentSessionId = sessionId
+            if let apps = status["applications"] as? [[String: Any]],
+               let firstApp = apps.first {
+                if let transportId = firstApp["transportId"] as? String {
+                    self.currentTransportId = transportId
+                }
+                if let sessionId = firstApp["sessionId"] as? String {
+                    self.currentSessionId = sessionId
+                }
+            }
+        } else if let devDict = dict["device"] as? [String: Any],
+                  let volDict = devDict["volume"] as? [String: Any],
+                  let lvl = volDict["level"] as? Double {
+            let floatLvl = Float(lvl)
+            self.currentVolume = floatLvl
+            if var dev = self.activeDevice {
+                dev.volume = floatLvl
+                self.activeDevice = dev
             }
         }
     }
@@ -243,7 +287,7 @@ public class CastProtocol: ObservableObject {
         connection?.send(content: packet, completion: .contentProcessed({ _ in }))
     }
     
-    private func encodeCastMessage(source: String, dest: String, ns: String, json: String) -> Data {
+    public func encodeCastMessage(source: String, dest: String, ns: String, json: String) -> Data {
         func makeVarint(_ val: UInt64) -> [UInt8] {
             var v = val
             var res: [UInt8] = []
