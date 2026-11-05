@@ -9,11 +9,15 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     private var listener: NWListener?
     private let audioQueue = DispatchQueue(label: "com.gpsurya.NestCast.audioServer", qos: .userInitiated)
     private var chimeWavData: Data
+    private var chimeOggData: Data
+    private var connections: [NWConnection] = []
+    private let connectionsLock = NSLock()
     
     public init(port: UInt16 = 8088) {
         self.port = port
         self.localIP = Self.getWiFiIP() ?? "127.0.0.1"
         self.chimeWavData = Self.generateChimeWAV()
+        self.chimeOggData = Self.loadChimeOgg()
     }
     
     public func start() {
@@ -54,6 +58,13 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     }
     
     public func stop() {
+        connectionsLock.lock()
+        for conn in connections {
+            conn.cancel()
+        }
+        connections.removeAll()
+        connectionsLock.unlock()
+        
         listener?.cancel()
         listener = nil
         DispatchQueue.main.async {
@@ -62,21 +73,44 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
         LogManager.shared.audio("HTTP server stopped")
     }
     
-    public func streamURL(endpoint: String = "ping.wav") -> String {
+    public func streamURL(endpoint: String = "chime.ogg") -> String {
         let ip = Self.getWiFiIP() ?? localIP
         return "http://\(ip):\(port)/\(endpoint)"
     }
     
     private func handleConnection(_ connection: NWConnection) {
+        connectionsLock.lock()
+        connections.append(connection)
+        connectionsLock.unlock()
+        
+        let closeConnection = { [weak self, weak connection] in
+            guard let conn = connection else { return }
+            conn.cancel()
+            if let self = self {
+                self.connectionsLock.lock()
+                self.connections.removeAll { $0 === conn }
+                self.connectionsLock.unlock()
+            }
+        }
+        
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled:
+                closeConnection()
+            default:
+                break
+            }
+        }
+        
         connection.start(queue: audioQueue)
         
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { [weak self] data, _, _, err in
             guard let self = self else {
-                connection.cancel()
+                closeConnection()
                 return
             }
             guard let reqData = data, let reqStr = String(data: reqData, encoding: .utf8) else {
-                connection.cancel()
+                closeConnection()
                 return
             }
             
@@ -87,24 +121,43 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
             
             LogManager.shared.audio("Incoming HTTP [\(method)] \(path)")
             
-            let audioData = self.chimeWavData
+            let isOgg = path.hasSuffix(".ogg")
+            let audioData = isOgg ? self.chimeOggData : self.chimeWavData
+            let contentType = isOgg ? "audio/ogg" : "audio/wav"
             let isHead = method == "HEAD"
             
-            let headers = [
-                "HTTP/1.1 200 OK",
-                "Content-Type: audio/wav",
-                "Content-Length: \(audioData.count)",
-                "Accept-Ranges: bytes",
-                "Connection: close",
-                "Access-Control-Allow-Origin: *",
-                "Cache-Control: no-cache",
-                "",
-                ""
-            ].joined(separator: "\r\n")
+            var statusLine = "HTTP/1.1 200 OK"
+            var slice = audioData
+            var contentRangeHeader = ""
             
-            var response = Data(headers.utf8)
+            if let rangeLine = lines.first(where: { $0.lowercased().starts(with: "range: bytes=") }) {
+                let rangeSpec = rangeLine.components(separatedBy: "=").last?.trimmingCharacters(in: .whitespaces) ?? ""
+                let parts = rangeSpec.components(separatedBy: "-")
+                if let startVal = Int(parts[0]), startVal < audioData.count {
+                    let endVal = (parts.count > 1 && !parts[1].isEmpty) ? (Int(parts[1]) ?? (audioData.count - 1)) : (audioData.count - 1)
+                    let boundedEnd = min(endVal, audioData.count - 1)
+                    if startVal <= boundedEnd {
+                        statusLine = "HTTP/1.1 206 Partial Content"
+                        slice = audioData.subdata(in: startVal..<(boundedEnd + 1))
+                        contentRangeHeader = "Content-Range: bytes \(startVal)-\(boundedEnd)/\(audioData.count)\r\n"
+                    }
+                }
+            }
+            
+            var headerStr = "\(statusLine)\r\n"
+            headerStr += "Content-Type: \(contentType)\r\n"
+            headerStr += "Content-Length: \(slice.count)\r\n"
+            if !contentRangeHeader.isEmpty {
+                headerStr += contentRangeHeader
+            }
+            headerStr += "Accept-Ranges: bytes\r\n"
+            headerStr += "Connection: close\r\n"
+            headerStr += "Access-Control-Allow-Origin: *\r\n"
+            headerStr += "Cache-Control: no-cache\r\n\r\n"
+            
+            var response = Data(headerStr.utf8)
             if !isHead {
-                response.append(audioData)
+                response.append(slice)
             }
             
             connection.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed({ sendErr in
@@ -114,10 +167,24 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
                     LogManager.shared.audio("Successfully dispatched \(response.count) bytes (clean close)")
                 }
                 self.audioQueue.asyncAfter(deadline: .now() + 0.5) {
-                    connection.cancel()
+                    closeConnection()
                 }
             }))
         }
+    }
+    
+    public static func loadChimeOgg() -> Data {
+        let candidates = [
+            Bundle.main.path(forResource: "chime", ofType: "ogg"),
+            "/Users/suryaprakashpalanisamy/NestCast/Resources/chime.ogg",
+            "/tmp/test_chime.ogg"
+        ]
+        for path in candidates {
+            if let p = path, let data = try? Data(contentsOf: URL(fileURLWithPath: p)), !data.isEmpty {
+                return data
+            }
+        }
+        return generateChimeWAV()
     }
     
     public static func getWiFiIP() -> String? {

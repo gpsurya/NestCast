@@ -176,9 +176,9 @@ public class CastProtocol: ObservableObject {
         }
     }
     
-    public func playChime(completion: ((Bool) -> Void)? = nil) {
-        let chimeURL = "https://actions.google.com/sounds/v1/alarms/medium_bell_ringing_near.ogg"
-        launchAndLoad(streamURL: chimeURL, completion: completion)
+    public func playChime(streamURL: String? = nil, completion: ((Bool) -> Void)? = nil) {
+        let soundURL = streamURL ?? "https://actions.google.com/sounds/v1/alarms/medium_bell_ringing_near.ogg"
+        launchAndLoad(streamURL: soundURL, completion: completion)
     }
     
     private func loadMedia(transportId: String, streamURL: String) {
@@ -295,7 +295,11 @@ public class CastProtocol: ObservableObject {
     
     public func handleJsonMessage(_ dict: [String: Any]) {
         let type = dict["type"] as? String ?? ""
-        LogManager.shared.cast("Packet: [\(type)]")
+        if type == "MEDIA_STATUS" {
+            LogManager.shared.cast("Packet [MEDIA_STATUS]: \(dict)")
+        } else {
+            LogManager.shared.cast("Packet: [\(type)]")
+        }
         
         if type == "LOAD_FAILED" {
             LogManager.shared.error("CastProtocol", "LOAD_FAILED: \(dict)")

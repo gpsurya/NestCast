@@ -47,6 +47,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
     
     private func setupStatusButton() {
         guard let button = statusItem.button else { return }
+        statusItem.length = 28
         button.image = NSImage(systemSymbolName: "airplayaudio", accessibilityDescription: "NestCast")
         button.action = #selector(togglePopover)
         button.target = self
@@ -70,8 +71,9 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
     
     private func updateButtonIcon(hasActiveDevice: Bool, isBridgeRunning: Bool) {
         guard let button = statusItem.button else { return }
-        let symbolName = (hasActiveDevice || isBridgeRunning) ? "airplayaudio.badge.checkmark" : "airplayaudio"
+        let symbolName = (hasActiveDevice || isBridgeRunning) ? "speaker.wave.3.fill" : "airplayaudio"
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "NestCast")
+        button.contentTintColor = (hasActiveDevice || isBridgeRunning) ? .systemGreen : nil
     }
     
     @objc public func togglePopover() {

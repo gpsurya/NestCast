@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cast = CastProtocol()
         let bridge = AirCastBridge()
         let server = AudioStreamServer()
+        server.start()
         
         self.statusBarController = StatusBarController(
             discovery: discovery,
