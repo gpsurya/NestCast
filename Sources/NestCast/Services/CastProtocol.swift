@@ -19,10 +19,18 @@ public class CastProtocol: ObservableObject {
     @Published public var currentVolume: Float = 0.5
     
     private var isAdjustingVolume: Bool = false
+    private var volumeAdjustGeneration: Int = 0
     private var connection: NWConnection?
     private var heartbeatTimer: Timer?
     private var volumeDebounceTimer: Timer?
+    private var volumeSettleTimer: Timer?
+    
     private var requestId: Int = 1
+    private let reqLock = NSLock()
+    private let tlsQueue = DispatchQueue(label: "com.gpsurya.NestCast.tls", qos: .userInitiated)
+    
+    // Persistent TCP stream reassembly buffer
+    private var tcpBuffer = Data()
     
     public init() {}
     
@@ -43,9 +51,10 @@ public class CastProtocol: ObservableObject {
         LogManager.shared.cast("Connecting to \(device.name) at \(host):\(device.port)...")
         
         let tlsOpts = NWProtocolTLS.Options()
+        // Dedicated queue for TLS verification to avoid blocking .main
         sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, comp in
             comp(true)
-        }, .main)
+        }, tlsQueue)
         
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(host),
@@ -54,6 +63,7 @@ public class CastProtocol: ObservableObject {
         
         let conn = NWConnection(to: endpoint, using: NWParameters(tls: tlsOpts))
         self.connection = conn
+        self.tcpBuffer.removeAll()
         
         conn.stateUpdateHandler = { [weak self] connState in
             Task { @MainActor [weak self] in
@@ -96,6 +106,9 @@ public class CastProtocol: ObservableObject {
         heartbeatTimer = nil
         volumeDebounceTimer?.invalidate()
         volumeDebounceTimer = nil
+        volumeSettleTimer?.invalidate()
+        volumeSettleTimer = nil
+        isAdjustingVolume = false
         
         if let transportId = currentTransportId {
             sendStop(transportId: transportId)
@@ -106,12 +119,16 @@ public class CastProtocol: ObservableObject {
         currentTransportId = nil
         currentSessionId = nil
         activeDevice = nil
+        tcpBuffer.removeAll()
         state = .disconnected
     }
     
     public func setVolume(level: Float) {
         let clamped = max(0.0, min(1.0, level))
         self.isAdjustingVolume = true
+        self.volumeAdjustGeneration += 1
+        let currentGen = self.volumeAdjustGeneration
+        
         self.currentVolume = clamped
         if var dev = activeDevice {
             dev.volume = clamped
@@ -130,8 +147,14 @@ public class CastProtocol: ObservableObject {
                 self.sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
                 LogManager.shared.cast("Dispatched SET_VOLUME -> \(Int(clamped * 100))%")
                 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.isAdjustingVolume = false
+                self.volumeSettleTimer?.invalidate()
+                self.volumeSettleTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
+                        if self.volumeAdjustGeneration == currentGen {
+                            self.isAdjustingVolume = false
+                        }
+                    }
                 }
             }
         }
@@ -144,8 +167,12 @@ public class CastProtocol: ObservableObject {
         ])
     }
     
-    public func launchAndLoad(streamURL: String, streamType: String = "LIVE", title: String = "Mac Live Desktop Audio", completion: ((Bool) -> Void)? = nil) {
+    public func launchAndLoad(streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio", completion: ((Bool) -> Void)? = nil) {
         state = .launching
+        // Clear any stale transport/session ID from prior sessions to prevent race conditions
+        self.currentTransportId = nil
+        self.currentSessionId = nil
+        
         LogManager.shared.cast("Launching Default Media Receiver (CC1AD845)...")
         let payload: [String: Any] = [
             "type": "LAUNCH",
@@ -181,7 +208,7 @@ public class CastProtocol: ObservableObject {
         launchAndLoad(streamURL: soundURL, streamType: "BUFFERED", title: "NestCast Chime", completion: completion)
     }
     
-    private func loadMedia(transportId: String, streamURL: String, streamType: String = "LIVE", title: String = "Mac Live Desktop Audio") {
+    private func loadMedia(transportId: String, streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio") {
         let mimeType: String
         if streamURL.contains("live.mp3") || streamURL.hasSuffix(".mp3") {
             mimeType = "audio/mpeg"
@@ -243,22 +270,41 @@ public class CastProtocol: ObservableObject {
     private func listenForMessages() {
         guard let conn = connection else { return }
         
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 65536) { [weak self] data, _, isComplete, err in
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, err in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if let d = data, d.count >= 4 {
-                    self.parseIncomingPacket(d)
+                if let d = data, !d.isEmpty {
+                    self.tcpBuffer.append(d)
+                    self.processTcpBuffer()
                 }
-                if !isComplete && err == nil {
+                if !isComplete && err == nil && self.connection != nil {
                     self.listenForMessages()
                 }
             }
         }
     }
     
-    private func parseIncomingPacket(_ data: Data) {
-        guard data.count > 4 else { return }
-        let payload = data.advanced(by: 4)
+    // Framing parser: extracts complete length-prefixed Cast V2 packets from TCP stream
+    private func processTcpBuffer() {
+        while tcpBuffer.count >= 4 {
+            let lengthPrefix = tcpBuffer.prefix(4).withUnsafeBytes { ptr -> UInt32 in
+                ptr.load(as: UInt32.self).bigEndian
+            }
+            let frameLength = Int(lengthPrefix)
+            let totalPacketSize = 4 + frameLength
+            
+            guard tcpBuffer.count >= totalPacketSize else {
+                // Incomplete frame; wait for next TCP chunk
+                break
+            }
+            
+            let packetData = tcpBuffer.subdata(in: 4..<totalPacketSize)
+            tcpBuffer.removeSubrange(0..<totalPacketSize)
+            parsePacketData(packetData)
+        }
+    }
+    
+    private func parsePacketData(_ payload: Data) {
         guard let text = String(data: payload, encoding: .utf8) ?? String(data: payload, encoding: .isoLatin1) else { return }
         
         var searchStart = text.startIndex
@@ -342,6 +388,8 @@ public class CastProtocol: ObservableObject {
     }
     
     private func nextRequestId() -> Int {
+        reqLock.lock()
+        defer { reqLock.unlock() }
         requestId += 1
         return requestId
     }

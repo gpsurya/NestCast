@@ -9,6 +9,7 @@ public class CastDiscovery: NSObject, ObservableObject {
     
     private var browser: NetServiceBrowser?
     private var activeServices: [NetService] = []
+    private var scanTask: Task<Void, Never>?
     
     public override init() {
         super.init()
@@ -18,6 +19,8 @@ public class CastDiscovery: NSObject, ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         activeServices.removeAll()
+        scanTask?.cancel()
+        
         LogManager.shared.info("Discovery", "Starting mDNS browse for _googlecast._tcp...")
         
         browser = NetServiceBrowser()
@@ -25,13 +28,16 @@ public class CastDiscovery: NSObject, ObservableObject {
         browser?.searchForServices(ofType: "_googlecast._tcp.", inDomain: "local.")
         
         // Auto-stop scan after 10 seconds to save battery, but keep discovered list
-        Task {
+        scanTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
-            self.stopDiscovery()
+            guard !Task.isCancelled else { return }
+            self?.stopDiscovery()
         }
     }
     
     public func stopDiscovery() {
+        scanTask?.cancel()
+        scanTask = nil
         browser?.stop()
         browser = nil
         isScanning = false
@@ -108,6 +114,7 @@ public class CastDiscovery: NSObject, ObservableObject {
     private func queryEurekaInfo(ip: String, deviceId: String) async {
         guard let url = URL(string: "https://\(ip):8443/setup/eureka_info") else { return }
         let session = URLSession(configuration: .ephemeral, delegate: InsecureCertDelegate(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
         
         do {
             let (data, response) = try await session.data(from: url)
@@ -139,7 +146,12 @@ extension CastDiscovery: NetServiceBrowserDelegate {
     public nonisolated func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
         Task { @MainActor in
             self.activeServices.removeAll(where: { $0.name == service.name })
-            self.devices.removeAll(where: { $0.id == service.name })
+            // Prune matching either device ID or Bonjour service name
+            self.devices.removeAll(where: {
+                $0.id == service.name ||
+                $0.host.localizedCaseInsensitiveContains(service.name) ||
+                $0.name == service.name
+            })
         }
     }
 }

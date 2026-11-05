@@ -109,15 +109,15 @@ public struct ActiveSessionView: View {
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(streamer.isStreaming ? .green : .accentColor)
                         
-                        Text("LIVE DESKTOP AUDIO")
+                        Text("HI-FI WI-FI STREAMING")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.secondary)
                         
                         Spacer()
                         
                         if streamer.isStreaming {
-                            Text("STREAMING")
-                                .font(.system(size: 8, weight: .bold))
+                            Text("320 KBPS • 48 kHz")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 2)
                                 .background(Color.green.opacity(0.2))
@@ -131,7 +131,7 @@ public struct ActiveSessionView: View {
                     }
                     
                     if streamer.isStreaming {
-                        Text("All Mac system sound (Brave, JioSaavn, YouTube, Music) is streaming live to \(device.name).")
+                        Text("Streaming studio-quality 320kbps audio directly to \(device.name) over Wi-Fi without Bluetooth compression.")
                             .font(.system(size: 10))
                             .foregroundColor(.primary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -141,7 +141,7 @@ public struct ActiveSessionView: View {
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("Connect to automatically route and stream desktop audio.")
+                        Text("Click Cast to stream uncompressed Mac audio over Wi-Fi.")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

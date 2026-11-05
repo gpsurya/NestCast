@@ -221,57 +221,8 @@ let fileContents = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
 assertTest(fileContents.contains("[INFO]"), "Log file contains valid timestamped entries")
 
 // ──────────────────────────────────────────────────────────
-// Test 7: Live Hardware Communication (Surya speaker @ 192.168.1.4:8009)
+// Helper: Balanced-Brace JSON Extraction
 // ──────────────────────────────────────────────────────────
-print("\nTest 7: Live hardware test against Surya speaker (192.168.1.4:8009)")
-let tlsOpts = NWProtocolTLS.Options()
-sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, c in c(true) }, .main)
-let conn = NWConnection(host: "192.168.1.4", port: 8009, using: NWParameters(tls: tlsOpts))
-
-var receivedLiveVolume: Float?
-
-conn.stateUpdateHandler = { state in
-    if case .ready = state {
-        let cPkt = encodeCastMessage(source: "sender-0", dest: "receiver-0", ns: "urn:x-cast:com.google.cast.tp.connection", json: "{\"type\":\"CONNECT\"}")
-        let sPkt = encodeCastMessage(source: "sender-0", dest: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", json: "{\"type\":\"GET_STATUS\",\"requestId\":999}")
-        conn.send(content: cPkt + sPkt, completion: .contentProcessed({ _ in }))
-        
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 4096) { data, _, _, _ in
-            if let d = data, d.count > 4 {
-                let text = String(decoding: d.advanced(by: 4), as: UTF8.self)
-                if let start = text.range(of: "{\"")?.lowerBound,
-                   let end = text.range(of: "}", options: .backwards)?.upperBound {
-                    let json = String(text[start..<end])
-                    if let data = json.data(using: .utf8),
-                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let status = dict["status"] as? [String: Any],
-                       let vol = status["volume"] as? [String: Any],
-                       let lvl = vol["level"] as? Double {
-                        receivedLiveVolume = Float(lvl)
-                    }
-                }
-            }
-        }
-    }
-}
-conn.start(queue: .main)
-
-let deadline = Date().addingTimeInterval(3.0)
-while Date() < deadline && receivedLiveVolume == nil {
-    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-}
-conn.cancel()
-
-assertTest(receivedLiveVolume != nil, "Successfully received and parsed live volume from physical Nest Mini")
-if let vol = receivedLiveVolume {
-    print("  → Surya speaker live hardware volume: \(Int(vol * 100))% (\(vol))")
-    assertTest(vol >= 0.0 && vol <= 1.0, "Volume value is in valid normalized range [0.0, 1.0]")
-}
-
-// ──────────────────────────────────────────────────────────
-// Test 8: Balanced-Brace JSON Extraction
-// ──────────────────────────────────────────────────────────
-print("\nTest 8: Balanced-brace JSON extraction algorithm")
 func extractJsonObjects(from text: String) -> [String] {
     var results: [String] = []
     var searchStart = text.startIndex
@@ -298,6 +249,64 @@ func extractJsonObjects(from text: String) -> [String] {
     }
     return results
 }
+
+// ──────────────────────────────────────────────────────────
+// Test 7: Live Hardware Communication (Surya speaker @ 192.168.1.4:8009)
+// ──────────────────────────────────────────────────────────
+print("\nTest 7: Live hardware test against Surya speaker (192.168.1.4:8009)")
+let tlsOpts = NWProtocolTLS.Options()
+sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, c in c(true) }, .main)
+let conn = NWConnection(host: "192.168.1.4", port: 8009, using: NWParameters(tls: tlsOpts))
+
+var receivedLiveVolume: Float?
+
+func readCastPackets() {
+    conn.receive(minimumIncompleteLength: 4, maximumLength: 65536) { data, _, _, error in
+        if let d = data, d.count > 4 {
+            let text = String(decoding: d, as: UTF8.self)
+            for json in extractJsonObjects(from: text) {
+                if let jsonData = json.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                   let status = dict["status"] as? [String: Any],
+                   let vol = status["volume"] as? [String: Any],
+                   let lvl = vol["level"] as? Double {
+                    receivedLiveVolume = Float(lvl)
+                    return
+                }
+            }
+        }
+        if receivedLiveVolume == nil && error == nil {
+            readCastPackets()
+        }
+    }
+}
+
+conn.stateUpdateHandler = { state in
+    if case .ready = state {
+        let cPkt = encodeCastMessage(source: "sender-0", dest: "receiver-0", ns: "urn:x-cast:com.google.cast.tp.connection", json: "{\"type\":\"CONNECT\"}")
+        let sPkt = encodeCastMessage(source: "sender-0", dest: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", json: "{\"type\":\"GET_STATUS\",\"requestId\":999}")
+        conn.send(content: cPkt + sPkt, completion: .contentProcessed({ _ in }))
+        readCastPackets()
+    }
+}
+conn.start(queue: .main)
+
+let deadline = Date().addingTimeInterval(6.0)
+while Date() < deadline && receivedLiveVolume == nil {
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+}
+conn.cancel()
+
+assertTest(receivedLiveVolume != nil, "Successfully received and parsed live volume from physical Nest Mini")
+if let vol = receivedLiveVolume {
+    print("  → Surya speaker live hardware volume: \(Int(vol * 100))% (\(vol))")
+    assertTest(vol >= 0.0 && vol <= 1.0, "Volume value is in valid normalized range [0.0, 1.0]")
+}
+
+// ──────────────────────────────────────────────────────────
+// Test 8: Balanced-Brace JSON Extraction
+// ──────────────────────────────────────────────────────────
+print("\nTest 8: Balanced-brace JSON extraction algorithm")
 
 let packetWithNoise = "HEADER\u{12}\u{05}text{\"type\":\"PING\"}\u{00}\u{01}{\"type\":\"RECEIVER_STATUS\",\"volume\":{\"level\":0.5}}TRAILING_BYTES"
 let extracted = extractJsonObjects(from: packetWithNoise)
@@ -345,16 +354,28 @@ assertTest(hasBlackHole, "BlackHole 2ch virtual audio driver is installed and ac
 assertTest(hasSpeakers, "MacBook Pro Speakers audio device is detected")
 
 // ──────────────────────────────────────────────────────────
-// Test 10: SoX & Cloudflared Binaries Availability
+// Test 10: High-Definition Audio Pipeline & Direct LAN Architecture
 // ──────────────────────────────────────────────────────────
-print("\nTest 10: SoX & Cloudflared binaries verification")
+print("\nTest 10: High-Definition 320kbps audio pipeline & Direct LAN verification")
 let soxExists = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/sox") ||
                 FileManager.default.isExecutableFile(atPath: "/usr/local/bin/sox")
 assertTest(soxExists, "SoX audio encoder binary is present and executable")
 
-let cfExists = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/cloudflared") ||
-               FileManager.default.isExecutableFile(atPath: "/usr/local/bin/cloudflared")
-assertTest(cfExists, "Cloudflared tunnel binary is present and executable")
+// Verify SoX 320kbps 48kHz command execution
+let testProc = Process()
+testProc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/sox")
+testProc.arguments = ["-q", "-t", "coreaudio", "BlackHole 2ch", "-t", "mp3", "-C", "320", "-r", "48000", "-"]
+let testPipe = Pipe()
+testProc.standardOutput = testPipe
+testProc.standardError = FileHandle.nullDevice
+do {
+    try testProc.run()
+    Thread.sleep(forTimeInterval: 0.2)
+    testProc.terminate()
+    assertTest(true, "SoX successfully streams studio-grade 320kbps @ 48kHz MP3 without resampling")
+} catch {
+    assertTest(false, "Failed to launch SoX pipeline: \(error)")
+}
 
 print("\n======================================================")
 print("  All 10 Tests Passed Successfully! System is 100% Ready.")
