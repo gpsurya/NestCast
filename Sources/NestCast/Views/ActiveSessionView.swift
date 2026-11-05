@@ -2,15 +2,18 @@ import SwiftUI
 
 public struct ActiveSessionView: View {
     @ObservedObject var cast: CastProtocol
+    @ObservedObject var streamer: DesktopAudioStreamer = .shared
     public let onTestChime: () -> Void
     public let onDisconnect: () -> Void
     
     public init(
         cast: CastProtocol,
+        streamer: DesktopAudioStreamer = .shared,
         onTestChime: @escaping () -> Void,
         onDisconnect: @escaping () -> Void
     ) {
         self.cast = cast
+        self.streamer = streamer
         self.onTestChime = onTestChime
         self.onDisconnect = onDisconnect
     }
@@ -99,20 +102,50 @@ public struct ActiveSessionView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 
-                // Browser Music Streaming Hint
-                VStack(alignment: .leading, spacing: 3) {
+                // Live Desktop Audio Status Card
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 5) {
-                        Image(systemName: "music.note")
+                        Image(systemName: "waveform")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.accentColor)
-                        Text("BROWSER STREAMING")
+                            .foregroundColor(streamer.isStreaming ? .green : .accentColor)
+                        
+                        Text("LIVE DESKTOP AUDIO")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.secondary)
+                        
+                        Spacer()
+                        
+                        if streamer.isStreaming {
+                            Text("STREAMING")
+                                .font(.system(size: 8, weight: .bold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.2))
+                                .foregroundColor(.green)
+                                .cornerRadius(4)
+                        } else if !streamer.statusText.isEmpty {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .frame(width: 12, height: 12)
+                        }
                     }
-                    Text("In Chrome / Brave: Click 3 dots → Cast... → choose \(device.name) to stream YouTube & Spotify directly over Wi-Fi.")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    if streamer.isStreaming {
+                        Text("All Mac system sound (Brave, JioSaavn, YouTube, Music) is streaming live to \(device.name).")
+                            .font(.system(size: 10))
+                            .foregroundColor(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if !streamer.statusText.isEmpty {
+                        Text(streamer.statusText)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Connect to automatically route and stream desktop audio.")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)

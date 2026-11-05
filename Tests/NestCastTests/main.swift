@@ -305,6 +305,57 @@ assertTest(extracted.count == 2, "Extracted exactly 2 JSON objects from noisy pr
 assertTest(extracted[0] == "{\"type\":\"PING\"}", "First extracted JSON is PING")
 assertTest(extracted[1].contains("RECEIVER_STATUS"), "Second extracted JSON is RECEIVER_STATUS")
 
+// ──────────────────────────────────────────────────────────
+// Test 9: CoreAudio Device Discovery & BlackHole Detection
+// ──────────────────────────────────────────────────────────
+print("\nTest 9: CoreAudio device discovery & BlackHole virtual device")
+import CoreAudio
+
+var propertyAddress = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDevices,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+)
+var dataSize: UInt32 = 0
+let status = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize)
+assertTest(status == noErr, "AudioObjectGetPropertyDataSize succeeds")
+let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+assertTest(count > 0, "Discovered at least one audio device (found: \(count))")
+
+var devs = [AudioDeviceID](repeating: 0, count: count)
+AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize, &devs)
+
+var hasBlackHole = false
+var hasSpeakers = false
+for dev in devs {
+    var nSize: UInt32 = 256
+    var nameBuf = [CChar](repeating: 0, count: 256)
+    var nAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    if AudioObjectGetPropertyData(dev, &nAddr, 0, nil, &nSize, &nameBuf) == noErr {
+        let name = String(cString: nameBuf)
+        if name.localizedCaseInsensitiveContains("BlackHole") { hasBlackHole = true }
+        if name.localizedCaseInsensitiveContains("Speakers") { hasSpeakers = true }
+    }
+}
+assertTest(hasBlackHole, "BlackHole 2ch virtual audio driver is installed and accessible")
+assertTest(hasSpeakers, "MacBook Pro Speakers audio device is detected")
+
+// ──────────────────────────────────────────────────────────
+// Test 10: SoX & Cloudflared Binaries Availability
+// ──────────────────────────────────────────────────────────
+print("\nTest 10: SoX & Cloudflared binaries verification")
+let soxExists = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/sox") ||
+                FileManager.default.isExecutableFile(atPath: "/usr/local/bin/sox")
+assertTest(soxExists, "SoX audio encoder binary is present and executable")
+
+let cfExists = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/cloudflared") ||
+               FileManager.default.isExecutableFile(atPath: "/usr/local/bin/cloudflared")
+assertTest(cfExists, "Cloudflared tunnel binary is present and executable")
+
 print("\n======================================================")
-print("  All 8 Tests Passed Successfully! System is 100% Ready.")
+print("  All 10 Tests Passed Successfully! System is 100% Ready.")
 print("======================================================\n")

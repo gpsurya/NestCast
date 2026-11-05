@@ -29,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         LogManager.shared.info("Lifecycle", "applicationWillTerminate received - Cleaning up")
+        DesktopAudioStreamer.shared.stopStreaming()
+        AudioDeviceManager.shared.restoreOriginalOutput()
     }
 }
 

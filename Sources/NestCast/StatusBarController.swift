@@ -35,7 +35,8 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
             discovery: discovery,
             cast: cast,
             bridge: bridge,
-            server: server
+            server: server,
+            streamer: DesktopAudioStreamer.shared
         )
         let hostingController = NSHostingController(rootView: contentView)
         hostingController.sizingOptions = [.preferredContentSize]
@@ -57,23 +58,31 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         cast.$activeDevice
             .receive(on: RunLoop.main)
             .sink { [weak self] dev in
-                self?.updateButtonIcon(hasActiveDevice: dev != nil, isBridgeRunning: self?.bridge.isRunning ?? false)
+                self?.updateButtonIcon()
             }
             .store(in: &cancellables)
         
         bridge.$isRunning
             .receive(on: RunLoop.main)
-            .sink { [weak self] running in
-                self?.updateButtonIcon(hasActiveDevice: self?.cast.activeDevice != nil, isBridgeRunning: running)
+            .sink { [weak self] _ in
+                self?.updateButtonIcon()
+            }
+            .store(in: &cancellables)
+            
+        DesktopAudioStreamer.shared.$isStreaming
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateButtonIcon()
             }
             .store(in: &cancellables)
     }
     
-    private func updateButtonIcon(hasActiveDevice: Bool, isBridgeRunning: Bool) {
+    private func updateButtonIcon() {
         guard let button = statusItem.button else { return }
-        let symbolName = (hasActiveDevice || isBridgeRunning) ? "speaker.wave.3.fill" : "airplayaudio"
+        let isActive = cast.activeDevice != nil || bridge.isRunning || DesktopAudioStreamer.shared.isStreaming
+        let symbolName = isActive ? "speaker.wave.3.fill" : "airplayaudio"
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "NestCast")
-        button.contentTintColor = (hasActiveDevice || isBridgeRunning) ? .systemGreen : nil
+        button.contentTintColor = isActive ? .systemGreen : nil
     }
     
     @objc public func togglePopover() {

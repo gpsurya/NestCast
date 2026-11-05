@@ -144,7 +144,7 @@ public class CastProtocol: ObservableObject {
         ])
     }
     
-    public func launchAndLoad(streamURL: String, completion: ((Bool) -> Void)? = nil) {
+    public func launchAndLoad(streamURL: String, streamType: String = "LIVE", title: String = "Mac Live Desktop Audio", completion: ((Bool) -> Void)? = nil) {
         state = .launching
         LogManager.shared.cast("Launching Default Media Receiver (CC1AD845)...")
         let payload: [String: Any] = [
@@ -156,12 +156,12 @@ public class CastProtocol: ObservableObject {
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
         Task {
-            for attempt in 1...25 {
+            for attempt in 1...30 {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if let transportId = self.currentTransportId {
                     LogManager.shared.cast("Receiver ready (transportId=\(transportId), attempt=\(attempt)). Sending CONNECT and LOAD...")
                     self.sendConnect(destination: transportId)
-                    self.loadMedia(transportId: transportId, streamURL: streamURL)
+                    self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title)
                     self.state = .playing
                     completion?(true)
                     return
@@ -178,28 +178,28 @@ public class CastProtocol: ObservableObject {
     
     public func playChime(streamURL: String? = nil, completion: ((Bool) -> Void)? = nil) {
         let soundURL = streamURL ?? "https://actions.google.com/sounds/v1/alarms/medium_bell_ringing_near.ogg"
-        launchAndLoad(streamURL: soundURL, completion: completion)
+        launchAndLoad(streamURL: soundURL, streamType: "BUFFERED", title: "NestCast Chime", completion: completion)
     }
     
-    private func loadMedia(transportId: String, streamURL: String) {
+    private func loadMedia(transportId: String, streamURL: String, streamType: String = "LIVE", title: String = "Mac Live Desktop Audio") {
         let mimeType: String
-        if streamURL.hasSuffix(".ogg") {
+        if streamURL.contains("live.mp3") || streamURL.hasSuffix(".mp3") {
+            mimeType = "audio/mpeg"
+        } else if streamURL.hasSuffix(".ogg") {
             mimeType = "audio/ogg"
-        } else if streamURL.hasSuffix(".mp3") {
-            mimeType = "audio/mp3"
         } else if streamURL.hasSuffix(".m4a") || streamURL.hasSuffix(".mp4") {
             mimeType = "audio/mp4"
         } else {
-            mimeType = "audio/ogg"
+            mimeType = "audio/mpeg"
         }
         
         let mediaDict: [String: Any] = [
             "contentId": streamURL,
             "contentType": mimeType,
-            "streamType": "BUFFERED",
+            "streamType": streamType,
             "metadata": [
                 "metadataType": 3,
-                "title": "NestCast Chime",
+                "title": title,
                 "artist": "NestCast"
             ]
         ]
@@ -216,7 +216,7 @@ public class CastProtocol: ObservableObject {
             payload["sessionId"] = sid
         }
         
-        LogManager.shared.cast("Dispatching LOAD to \(transportId) with URL: \(streamURL)")
+        LogManager.shared.cast("Dispatching LOAD (\(streamType)) to \(transportId) with URL: \(streamURL)")
         sendJson(destination: transportId, ns: "urn:x-cast:com.google.cast.media", dict: payload)
     }
     

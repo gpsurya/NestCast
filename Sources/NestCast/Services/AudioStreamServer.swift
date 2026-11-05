@@ -2,6 +2,8 @@ import Foundation
 import Network
 
 public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
+    public static var sharedInstance: AudioStreamServer?
+    
     @Published public var isRunning: Bool = false
     @Published public var localIP: String = "127.0.0.1"
     @Published public var port: UInt16 = 8088
@@ -12,12 +14,41 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     private var chimeOggData: Data
     private var connections: [NWConnection] = []
     private let connectionsLock = NSLock()
+    private var liveConnections: [NWConnection] = []
+    private let liveLock = NSLock()
+    
+    public func broadcastLiveChunk(_ chunk: Data) {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        var active: [NWConnection] = []
+        for conn in liveConnections {
+            if conn.state == .ready {
+                conn.send(content: chunk, isComplete: false, completion: .contentProcessed({ [weak conn] err in
+                    if err != nil {
+                        conn?.cancel()
+                    }
+                }))
+                active.append(conn)
+            }
+        }
+        liveConnections = active
+    }
+    
+    public func closeLiveConnections() {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        for conn in liveConnections {
+            conn.cancel()
+        }
+        liveConnections.removeAll()
+    }
     
     public init(port: UInt16 = 8088) {
         self.port = port
         self.localIP = Self.getWiFiIP() ?? "127.0.0.1"
         self.chimeWavData = Self.generateChimeWAV()
         self.chimeOggData = Self.loadChimeOgg()
+        Self.sharedInstance = self
     }
     
     public func start() {
@@ -58,6 +89,7 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     }
     
     public func stop() {
+        closeLiveConnections()
         connectionsLock.lock()
         for conn in connections {
             conn.cancel()
@@ -104,8 +136,8 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
         
         connection.start(queue: audioQueue)
         
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { [weak self] data, _, _, err in
-            guard let self = self else {
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { [weak self, weak connection] data, _, _, err in
+            guard let self = self, let conn = connection else {
                 closeConnection()
                 return
             }
@@ -120,6 +152,32 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
             let path = firstLine.components(separatedBy: " ").count > 1 ? firstLine.components(separatedBy: " ")[1] : "/"
             
             LogManager.shared.audio("Incoming HTTP [\(method)] \(path)")
+            
+            if path.contains("live.mp3") {
+                LogManager.shared.audio("Live streaming subscriber connected: \(conn)")
+                let headers = [
+                    "HTTP/1.1 200 OK",
+                    "Content-Type: audio/mpeg",
+                    "Access-Control-Allow-Origin: *",
+                    "Cache-Control: no-cache, no-store",
+                    "Pragma: no-cache",
+                    "Connection: keep-alive",
+                    "",
+                    ""
+                ].joined(separator: "\r\n")
+                
+                conn.send(content: Data(headers.utf8), isComplete: false, completion: .contentProcessed({ [weak self, weak conn] err in
+                    guard let self = self, let activeConn = conn, err == nil else {
+                        closeConnection()
+                        return
+                    }
+                    self.liveLock.lock()
+                    self.liveConnections.append(activeConn)
+                    self.liveLock.unlock()
+                    LogManager.shared.audio("Client actively subscribed to /live.mp3 stream")
+                }))
+                return
+            }
             
             let isOgg = path.hasSuffix(".ogg")
             let audioData = isOgg ? self.chimeOggData : self.chimeWavData
@@ -160,7 +218,7 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
                 response.append(slice)
             }
             
-            connection.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed({ sendErr in
+            conn.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed({ sendErr in
                 if let e = sendErr {
                     LogManager.shared.error("AudioServer", "Send error: \(e.localizedDescription)")
                 } else {

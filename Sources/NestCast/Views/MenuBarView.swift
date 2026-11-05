@@ -5,17 +5,20 @@ public struct MenuBarView: View {
     @ObservedObject var cast: CastProtocol
     @ObservedObject var bridge: AirCastBridge
     @ObservedObject var server: AudioStreamServer
+    @ObservedObject var streamer: DesktopAudioStreamer = .shared
     
     public init(
         discovery: CastDiscovery,
         cast: CastProtocol,
         bridge: AirCastBridge,
-        server: AudioStreamServer
+        server: AudioStreamServer,
+        streamer: DesktopAudioStreamer = .shared
     ) {
         self.discovery = discovery
         self.cast = cast
         self.bridge = bridge
         self.server = server
+        self.streamer = streamer
     }
     
     public var body: some View {
@@ -52,11 +55,12 @@ public struct MenuBarView: View {
             if cast.activeDevice != nil {
                 ActiveSessionView(
                     cast: cast,
+                    streamer: streamer,
                     onTestChime: {
                         handlePlayTestSound()
                     },
                     onDisconnect: {
-                        cast.disconnect()
+                        handleDisconnect()
                     }
                 )
             }
@@ -114,13 +118,14 @@ public struct MenuBarView: View {
             
             // Footer
             HStack {
-                Text("v1.0.1 • gpsurya")
+                Text("v1.0.2 • gpsurya")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
                 
                 Spacer()
                 
                 Button("Quit") {
+                    streamer.stopStreaming()
                     cast.disconnect()
                     bridge.stopBridge()
                     server.stop()
@@ -136,7 +141,12 @@ public struct MenuBarView: View {
     }
     
     private func handleSpeakerConnect(_ device: CastDevice) {
-        cast.connect(to: device)
+        streamer.startStreaming(to: device, server: server, cast: cast)
+    }
+    
+    private func handleDisconnect() {
+        streamer.stopStreaming()
+        cast.disconnect()
     }
     
     private func handlePlayTestSound() {
