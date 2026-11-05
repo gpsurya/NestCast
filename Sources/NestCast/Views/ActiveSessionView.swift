@@ -131,7 +131,7 @@ public struct ActiveSessionView: View {
                     }
                     
                     if streamer.isStreaming {
-                        Text("Streaming studio-quality 320kbps audio directly to \(device.name) over Wi-Fi without Bluetooth compression.")
+                        Text("Streaming studio-quality 320kbps audio to \(device.name) over Wi-Fi without Bluetooth compression (Audio-only music listening).")
                             .font(.system(size: 10))
                             .foregroundColor(.primary)
                             .fixedSize(horizontal: false, vertical: true)

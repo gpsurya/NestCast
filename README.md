@@ -34,13 +34,39 @@ macOS natively supports AirPlay, but completely excludes **Google Cast** devices
 
 - **Studio-Grade 320 kbps CBR MP3 @ 48,000 Hz:** Direct CoreAudio DAC matching with zero resampling distortion or aliasing artifacts. Significantly superior to Bluetooth audio.
 - **Sub-Second Instant Connect & Replay (<0.8s):** Pre-warmed streaming ingress eliminates cold-start process spin-up and edge DNS propagation delays. Connecting or replaying to a speaker takes just ~0.66 seconds.
-- **Near-Real-Time Audio Pipeline (Low Latency):** Captured via SoX using a 1024-sample buffer (~21.3 ms frames at ~40 FPS) and served with `TCP_NODELAY` network socket dispatching. Keeps video dialogue and karaoke lyrics synchronized with speaker audio.
+- **Low-Latency Host Pipeline:** Audio is captured via SoX using a 1024-sample buffer (~21.3 ms frames at ~40 FPS) and served with `TCP_NODELAY` network socket dispatching, eliminating local Mac buffering lag.
 - **Instant Hardware Disconnect (<0.15s):** Dispatches Cast V2 `STOP` and `CLOSE` frames directly to the media receiver transport before socket closure. The speaker halts audio immediately without playing out leftover memory buffers, and Mac speakers resume playing in 1 ms.
 - **Live Bi-Directional Volume Synchronization:** Interactive menu bar volume slider with intelligent anti-rubber-banding that prevents echo packet overwrites.
 - **Dual-Mode Network Routing (Direct LAN + Zero-Trust Fallback):** Automatically streams over Direct Wi-Fi LAN; seamlessly activates outbound tunnel fallback for managed enterprise laptops subject to stealth-mode packet filters or corporate firewalls.
 - **Zero Third-Party SDK Bloat:** Pure, native Swift implementation of the Google Cast V2 wire protocol (Protobuf framing over TLS on port `8009`).
 - **AirPlay Bridge Mode:** Integrated one-click helper to expose all Google Nest speakers as native macOS AirPlay sound outputs.
 - **Self-Contained Hardware Test Suite:** Built-in test runner that tests and verifies Cast V2 wire protocol, volume synchronization, and live physical speaker communication.
+
+---
+
+## ⚠️ Important: Audio-Only Streaming & Video Lip-Sync Limitation
+
+**NestCast is designed specifically for high-fidelity audio and music listening.** It is **not suitable for watching videos, YouTube video viewing, movies, or real-time gaming**.
+
+### Why is there a delay between the screen and the speaker?
+When streaming system audio to a Google Nest Mini or Chromecast, there is an inherent **6 to 12-second delay** between the video playing on your screen and the sound coming out of your speaker. This is a fundamental property of Google Cast hardware:
+
+1. **Google Cast's Mandatory Hardware Jitter Buffer:**
+   Unlike an analog audio cable or Bluetooth (which streams unbuffered point-to-point radio packets), a Google Nest Mini is an autonomous networked computer running the Google Cast Application Framework (CAF). When it receives an HTTP live audio stream, the speaker's internal firmware **enforces a mandatory 6 to 10-second safety buffer** before rendering the first sound. Google designed it this way to prevent audio dropouts across whole-home multi-room speaker groups over consumer Wi-Fi.
+
+2. **Why Bluetooth and AirPlay Appear in Sync:**
+   - **Bluetooth:** Peer-to-peer radio protocol with minimal buffering (~50–150 ms), but suffers from lossy compression, interference, and strict 10-meter range limits.
+   - **AirPlay (Video):** When you play a video in Safari or QuickTime over AirPlay, macOS **delays the video on your screen** by 2 seconds to match the AirPlay speaker's buffer. That is why AirPlay lip-sync looks smooth — the video is artificially held back to match the speaker.
+   - **Google Cast Desktop Streaming:** macOS does not know that an external Google speaker is receiving an audio stream from an internal virtual device, so macOS cannot delay video playback in third-party browsers (Brave, Chrome, Firefox) or desktop video players. Your Mac screen displays the video in real-time ($T = 0$), while the Google Nest Mini emits audio from its internal buffer ($T = -8\text{s}$).
+
+3. **Known Industry Reality:**
+   Every desktop-to-Chromecast audio streamer in existence (`mkchromecast`, `AirConnect`, `pulseaudio-dlna`) operates under this exact same 5–15 second Google Cast buffer limitation.
+
+### Recommended Use Cases:
+- ✅ **Music & Album Streaming:** JioSaavn, Spotify, Apple Music, TIDAL, YouTube Music in background tabs.
+- ✅ **Podcasts & Radio Shows:** Long-form audio where video sync is irrelevant.
+- ✅ **Ambient & Focus Audio:** Lo-fi streams, white noise, work playlists.
+- ❌ **Not Recommended For:** Watching YouTube videos, Netflix / movies (lip-sync will not match), competitive gaming, or video conferencing (Zoom/Meet).
 
 ---
 
