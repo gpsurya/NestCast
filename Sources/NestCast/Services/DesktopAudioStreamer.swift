@@ -223,6 +223,32 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                 
                 if waitResult == .success, let baseURL = discoveredTunnelURL {
                     let liveURL = "\(baseURL)/live.mp3"
+                    LogManager.shared.audio("Tunnel registered. Verifying public edge propagation for \(baseURL)...")
+                    
+                    // Warm up and verify edge DNS before dispatching to Nest Mini
+                    var isReachable = false
+                    for attempt in 1...10 {
+                        Thread.sleep(forTimeInterval: 0.5)
+                        if let checkURL = URL(string: "\(baseURL)/chime.ogg") {
+                            var request = URLRequest(url: checkURL)
+                            request.httpMethod = "HEAD"
+                            request.timeoutInterval = 1.0
+                            let semaphore = DispatchSemaphore(value: 0)
+                            let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+                                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                                    isReachable = true
+                                }
+                                semaphore.signal()
+                            }
+                            task.resume()
+                            _ = semaphore.wait(timeout: .now() + 1.2)
+                            if isReachable {
+                                LogManager.shared.audio("Tunnel verified live and reachable at attempt \(attempt)")
+                                break
+                            }
+                        }
+                    }
+                    
                     proceedWithStream(url: liveURL, isTunnel: true)
                 } else {
                     LogManager.shared.audio("Tunnel timed out or unavailable, falling back to Direct LAN: \(directLANURL)")
