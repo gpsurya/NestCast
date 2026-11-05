@@ -165,12 +165,33 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
             
             LogManager.shared.audio("Incoming HTTP [\(method)] \(path) from \(activeConn.endpoint)")
             
+            // Route: CORS / Private Network Access Preflight (OPTIONS)
+            if method == "OPTIONS" {
+                let optionsHeaders = [
+                    "HTTP/1.1 204 No Content",
+                    "Access-Control-Allow-Origin: *",
+                    "Access-Control-Allow-Methods: GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers: *",
+                    "Access-Control-Allow-Private-Network: true",
+                    "Access-Control-Max-Age: 86400",
+                    "Content-Length: 0",
+                    "",
+                    ""
+                ].joined(separator: "\r\n")
+                activeConn.send(content: Data(optionsHeaders.utf8), isComplete: true, completion: .contentProcessed({ [weak self, weak activeConn] _ in
+                    if let c = activeConn { self?.removeConnection(c) }
+                }))
+                return
+            }
+            
             // Route: Live Audio Stream (High-Definition 320kbps MP3)
             if path.contains("live.mp3") {
                 let headers = [
                     "HTTP/1.1 200 OK",
                     "Content-Type: audio/mpeg",
                     "Access-Control-Allow-Origin: *",
+                    "Access-Control-Allow-Private-Network: true",
+                    "Accept-Ranges: none",
                     "Cache-Control: no-cache, no-store",
                     "Pragma: no-cache",
                     "Connection: keep-alive",
@@ -224,6 +245,7 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
             headerStr += "Accept-Ranges: bytes\r\n"
             headerStr += "Connection: close\r\n"
             headerStr += "Access-Control-Allow-Origin: *\r\n"
+            headerStr += "Access-Control-Allow-Private-Network: true\r\n"
             headerStr += "Cache-Control: no-cache\r\n\r\n"
             
             var response = Data(headerStr.utf8)

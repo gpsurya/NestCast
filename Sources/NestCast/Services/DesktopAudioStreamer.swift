@@ -11,7 +11,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
     
     private var soxProcess: Process?
     private var soxPipe: Pipe?
+    private var cloudflaredProcess: Process?
     private var activeSessionToken: UUID?
+    private let streamQueue = DispatchQueue(label: "com.gpsurya.NestCast.desktopAudioStreamer", qos: .userInitiated)
     private let lock = NSLock()
     
     public init() {
@@ -113,58 +115,123 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 3. Prepare Direct Local LAN Stream URL (Zero Cloudflare / Public Internet)
+        // 3. Resolve Stream URL (Tunnel if available for zero-trust/corporate firewalls, else Direct LAN)
         let localIP = AudioStreamServer.getWiFiIP(matchingSubnetOf: device.ipAddress) ?? server.localIP
-        let liveURL = "http://\(localIP):\(server.port)/live.mp3"
-        LogManager.shared.cast("Direct Wi-Fi audio stream URL for \(device.name): \(liveURL)")
+        let directLANURL = "http://\(localIP):\(server.port)/live.mp3"
+        let cfPath = findExecutable(named: "cloudflared")
         
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.lock.lock()
-            guard self.activeSessionToken == sessionToken else {
-                self.lock.unlock()
-                return
-            }
-            self.currentStreamURL = liveURL
-            self.isStreaming = true
-            self.statusText = "Streaming Hi-Fi 320kbps audio to \(device.name)"
-            self.lock.unlock()
-            
-            // Connect to Cast device and launch Default Media Receiver
-            cast.connect(to: device) { [weak self] success in
+        func proceedWithStream(url: String, isTunnel: Bool) {
+            DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.lock.lock()
                 guard self.activeSessionToken == sessionToken else {
                     self.lock.unlock()
                     return
                 }
+                self.currentStreamURL = url
+                self.isStreaming = true
+                self.statusText = isTunnel ? "Streaming Hi-Fi 320k (Firewall Safe) to \(device.name)" : "Streaming Hi-Fi 320k to \(device.name)"
                 self.lock.unlock()
                 
-                if success {
-                    cast.launchAndLoad(streamURL: liveURL, streamType: "LIVE", title: "Mac Desktop Audio (Hi-Fi 320k)") { [weak self] loadSuccess in
-                        guard let self = self else { return }
-                        self.lock.lock()
-                        guard self.activeSessionToken == sessionToken else {
-                            self.lock.unlock()
-                            return
-                        }
+                LogManager.shared.cast("Dispatching stream URL to \(device.name): \(url) (tunnel: \(isTunnel))")
+                
+                // Connect to Cast device and launch Default Media Receiver
+                cast.connect(to: device) { [weak self] success in
+                    guard let self = self else { return }
+                    self.lock.lock()
+                    guard self.activeSessionToken == sessionToken else {
                         self.lock.unlock()
-                        
-                        if loadSuccess {
-                            LogManager.shared.cast("Live stream loaded successfully on \(device.name)")
-                            completion?(true)
-                        } else {
-                            LogManager.shared.error("DesktopAudioStreamer", "Failed to load media stream on speaker")
-                            self.stopStreaming()
-                            completion?(false)
-                        }
+                        return
                     }
-                } else {
-                    LogManager.shared.error("DesktopAudioStreamer", "Failed to connect Cast protocol to \(device.name)")
-                    self.stopStreaming()
-                    completion?(false)
+                    self.lock.unlock()
+                    
+                    if success {
+                        cast.launchAndLoad(streamURL: url, streamType: "LIVE", title: "Mac Desktop Audio (Hi-Fi 320k)") { [weak self] loadSuccess in
+                            guard let self = self else { return }
+                            self.lock.lock()
+                            guard self.activeSessionToken == sessionToken else {
+                                self.lock.unlock()
+                                return
+                            }
+                            self.lock.unlock()
+                            
+                            if loadSuccess {
+                                LogManager.shared.cast("Live stream loaded successfully on \(device.name)")
+                                completion?(true)
+                            } else {
+                                LogManager.shared.error("DesktopAudioStreamer", "Failed to load media stream on speaker")
+                                self.stopStreaming()
+                                completion?(false)
+                            }
+                        }
+                    } else {
+                        LogManager.shared.error("DesktopAudioStreamer", "Failed to connect Cast protocol to \(device.name)")
+                        self.stopStreaming()
+                        completion?(false)
+                    }
                 }
             }
+        }
+        
+        if let cfPath = cfPath {
+            DispatchQueue.main.async {
+                self.statusText = "Establishing secure audio stream..."
+            }
+            let cf = Process()
+            cf.executableURL = URL(fileURLWithPath: cfPath)
+            cf.arguments = ["tunnel", "--url", "http://127.0.0.1:\(server.port)"]
+            
+            let cfPipe = Pipe()
+            cf.standardOutput = cfPipe
+            cf.standardError = cfPipe
+            
+            let tunnelGroup = DispatchGroup()
+            tunnelGroup.enter()
+            var discoveredTunnelURL: String?
+            
+            cfPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard let text = String(data: data, encoding: .utf8) else { return }
+                for line in text.components(separatedBy: "\n") {
+                    if line.contains("trycloudflare.com") && discoveredTunnelURL == nil {
+                        let tokens = line.components(separatedBy: CharacterSet.whitespacesAndNewlines)
+                        for token in tokens {
+                            if token.hasPrefix("https://") && token.contains("trycloudflare.com") {
+                                discoveredTunnelURL = token
+                                LogManager.shared.audio("Cloudflared tunnel established: \(token)")
+                                tunnelGroup.leave()
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            
+            do {
+                try cf.run()
+                self.lock.lock()
+                self.cloudflaredProcess = cf
+                self.lock.unlock()
+            } catch {
+                LogManager.shared.error("DesktopAudioStreamer", "Failed to run cloudflared: \(error.localizedDescription)")
+            }
+            
+            streamQueue.async { [weak self] in
+                guard self != nil else { return }
+                let waitResult = tunnelGroup.wait(timeout: .now() + 8.0)
+                cfPipe.fileHandleForReading.readabilityHandler = nil
+                
+                if waitResult == .success, let baseURL = discoveredTunnelURL {
+                    let liveURL = "\(baseURL)/live.mp3"
+                    proceedWithStream(url: liveURL, isTunnel: true)
+                } else {
+                    LogManager.shared.audio("Tunnel timed out or unavailable, falling back to Direct LAN: \(directLANURL)")
+                    proceedWithStream(url: directLANURL, isTunnel: false)
+                }
+            }
+        } else {
+            LogManager.shared.cast("Direct Wi-Fi audio stream URL for \(device.name): \(directLANURL)")
+            proceedWithStream(url: directLANURL, isTunnel: false)
         }
     }
     
@@ -178,6 +245,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         
         soxProcess?.terminate()
         soxProcess = nil
+        
+        cloudflaredProcess?.terminate()
+        cloudflaredProcess = nil
         lock.unlock()
         
         AudioDeviceManager.shared.restoreOriginalOutput()
