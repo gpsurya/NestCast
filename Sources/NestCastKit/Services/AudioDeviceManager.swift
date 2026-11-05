@@ -196,8 +196,12 @@ public final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
         // If the user already manually changed away from BlackHole while streaming, respect their manual change
         if let cur = current, cur != bhID {
             originalDeviceID = nil
-            DispatchQueue.main.async {
+            if Thread.isMainThread {
                 self.isRedirectedToBlackHole = false
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isRedirectedToBlackHole = false
+                }
             }
             return true
         }
@@ -225,8 +229,12 @@ public final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
         let success = setDefaultOutput(deviceID: tid)
         if success {
             originalDeviceID = nil
-            DispatchQueue.main.async {
+            if Thread.isMainThread {
                 self.isRedirectedToBlackHole = false
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isRedirectedToBlackHole = false
+                }
             }
             LogManager.shared.audio("Restored macOS Default Audio Output to device ID: \(tid)")
         } else {

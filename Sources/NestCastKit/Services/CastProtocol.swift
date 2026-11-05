@@ -313,7 +313,7 @@ public class CastProtocol: ObservableObject {
         ])
     }
     
-    public func launchAndLoad(streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio", completion: ((Bool) -> Void)? = nil) {
+    public func launchAndLoad(streamURL: String, streamType: String = "BUFFERED", title: String = "Mac Desktop Audio", completion: ((Bool) -> Void)? = nil) {
         state = .launching
         self.currentTransportId = nil
         self.currentSessionId = nil
@@ -330,6 +330,10 @@ public class CastProtocol: ObservableObject {
             self.sendConnect(destination: transportId)
             self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title, requestId: loadReqId)
             self.state = .loading
+            if let comp = self.pendingLoadCompletion {
+                self.pendingLoadCompletion = nil
+                comp(true)
+            }
         }
         
         self.onReceiverReady = dispatchLoad
@@ -343,13 +347,13 @@ public class CastProtocol: ObservableObject {
         
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
-        // Safety timeout fallback (8s)
+        // Safety timeout fallback (30s) in case network drops launch packet
         Task {
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
             guard self.sessionGeneration == gen else { return }
-            if self.onReceiverReady != nil || (self.state != .playing && self.pendingLoadCompletion != nil) {
+            if self.onReceiverReady != nil {
                 self.onReceiverReady = nil
-                let timeoutMsg = "Timed out waiting for speaker to start playback"
+                let timeoutMsg = "Timed out waiting for Media Receiver launch"
                 LogManager.shared.error("CastProtocol", timeoutMsg)
                 self.state = .error(timeoutMsg)
                 let comp = self.pendingLoadCompletion

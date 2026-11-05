@@ -267,19 +267,14 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 3. First-chunk watchdog timer (3.5s)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+        // 3. First-chunk diagnostic watchdog (non-fatal notice)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
             let received = self.hasReceivedFirstAudioChunk
-            let stillStreaming = self.isStreaming || self.activeSessionToken == sessionToken
             self.lock.unlock()
-            
-            if stillStreaming && !received {
-                LogManager.shared.error("DesktopAudioStreamer", "Watchdog: No audio chunks received from BlackHole within 3.5s")
-                self.statusText = "No audio received from audio driver"
-                self.stopStreaming()
-                completion?(false)
+            if !received {
+                LogManager.shared.audio("Notice: No audio activity detected yet from BlackHole (audio may be paused on Mac)")
             }
         }
         
@@ -312,7 +307,7 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                     self.lock.unlock()
                     
                     if success {
-                        cast.launchAndLoad(streamURL: url, streamType: "LIVE", title: "Mac Desktop Audio") { [weak self] loadSuccess in
+                        cast.launchAndLoad(streamURL: url, streamType: "BUFFERED", title: "Mac Desktop Audio") { [weak self] loadSuccess in
                             guard let self = self else { return }
                             self.lock.lock()
                             guard self.activeSessionToken == sessionToken else {
@@ -336,7 +331,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                                             return
                                         }
                                         let secureTunnelURL = "\(tURL)/live.mp3?token=\(sessionToken)"
-                                        dispatchToSpeaker(url: secureTunnelURL, isTunnel: true)
+                                        cast.disconnect {
+                                            dispatchToSpeaker(url: secureTunnelURL, isTunnel: true)
+                                        }
                                     }
                                 } else {
                                     LogManager.shared.error("DesktopAudioStreamer", "Failed to load media stream on speaker")

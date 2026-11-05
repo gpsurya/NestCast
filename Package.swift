@@ -21,7 +21,13 @@ let package = Package(
         .testTarget(
             name: "NestCastTests",
             dependencies: ["NestCastKit"],
-            path: "Tests/NestCastTests"
+            path: "Tests/NestCastTests",
+            swiftSettings: [
+                .unsafeFlags([
+                    "-load-plugin-library",
+                    "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+                ])
+            ]
         )
     ]
 )
