@@ -18,6 +18,7 @@ public class CastDiscovery: NSObject, ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         activeServices.removeAll()
+        LogManager.shared.info("Discovery", "Starting mDNS browse for _googlecast._tcp...")
         
         browser = NetServiceBrowser()
         browser?.delegate = self
@@ -35,6 +36,7 @@ public class CastDiscovery: NSObject, ObservableObject {
         browser = nil
         isScanning = false
         lastScanDate = Date()
+        LogManager.shared.info("Discovery", "mDNS browse stopped. Total speakers found: \(devices.count)")
     }
     
     public func refresh() {
@@ -69,7 +71,6 @@ public class CastDiscovery: NSObject, ObservableObject {
             }
         }
         
-        // If IP wasn't in sockaddr, fall back to hostname without trailing dot
         let cleanHost = hostName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
         
         let newDevice = CastDevice(
@@ -94,9 +95,9 @@ public class CastDiscovery: NSObject, ObservableObject {
             }
         } else {
             devices.append(newDevice)
+            LogManager.shared.info("Discovery", "Discovered speaker: '\(friendlyName)' (\(model)) at \(ipAddress ?? cleanHost)")
         }
         
-        // Fetch detailed eureka info if IP is available
         if let targetIP = ipAddress {
             Task {
                 await self.queryEurekaInfo(ip: targetIP, deviceId: deviceId)
@@ -106,8 +107,6 @@ public class CastDiscovery: NSObject, ObservableObject {
     
     private func queryEurekaInfo(ip: String, deviceId: String) async {
         guard let url = URL(string: "https://\(ip):8443/setup/eureka_info") else { return }
-        
-        // Session that skips self-signed cert checks
         let session = URLSession(configuration: .ephemeral, delegate: InsecureCertDelegate(), delegateQueue: nil)
         
         do {
@@ -119,10 +118,11 @@ public class CastDiscovery: NSObject, ObservableObject {
                 if let idx = self.devices.firstIndex(where: { $0.id == deviceId }) {
                     self.devices[idx].name = name
                     self.devices[idx].ipAddress = ip
+                    LogManager.shared.info("Discovery", "Resolved Eureka name: '\(name)' for \(ip)")
                 }
             }
         } catch {
-            // Offline or port 8443 disabled
+            // Eureka port is optional
         }
     }
 }

@@ -1,19 +1,19 @@
 import Foundation
 import Network
 
-public class AudioStreamServer: ObservableObject {
+public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     @Published public var isRunning: Bool = false
     @Published public var localIP: String = "127.0.0.1"
     @Published public var port: UInt16 = 8088
     
     private var listener: NWListener?
     private let audioQueue = DispatchQueue(label: "com.gpsurya.NestCast.audioServer", qos: .userInitiated)
-    private var customAudioData: Data?
+    private var chimeWavData: Data
     
     public init(port: UInt16 = 8088) {
         self.port = port
         self.localIP = Self.getWiFiIP() ?? "127.0.0.1"
-        self.customAudioData = Self.loadDefaultAudio()
+        self.chimeWavData = Self.generateChimeWAV()
     }
     
     public func start() {
@@ -27,11 +27,17 @@ public class AudioStreamServer: ObservableObject {
             
             newListener.stateUpdateHandler = { [weak self] state in
                 DispatchQueue.main.async {
-                    if case .ready = state {
-                        self?.isRunning = true
-                        self?.localIP = currentIP
-                    } else if case .failed = state {
-                        self?.isRunning = false
+                    guard let self = self else { return }
+                    switch state {
+                    case .ready:
+                        self.isRunning = true
+                        self.localIP = currentIP
+                        LogManager.shared.audio("HTTP server listening on http://\(self.localIP):\(self.port)")
+                    case .failed(let err):
+                        self.isRunning = false
+                        LogManager.shared.error("AudioServer", "Server failed: \(err.localizedDescription)")
+                    default:
+                        break
                     }
                 }
             }
@@ -43,7 +49,7 @@ public class AudioStreamServer: ObservableObject {
             self.listener = newListener
             newListener.start(queue: audioQueue)
         } catch {
-            print("Failed to start AudioStreamServer: \(error)")
+            LogManager.shared.error("AudioServer", "Failed to start listener: \(error.localizedDescription)")
         }
     }
     
@@ -53,47 +59,63 @@ public class AudioStreamServer: ObservableObject {
         DispatchQueue.main.async {
             self.isRunning = false
         }
+        LogManager.shared.audio("HTTP server stopped")
     }
     
     public func streamURL(endpoint: String = "ping.wav") -> String {
-        return "http://\(localIP):\(port)/\(endpoint)"
-    }
-    
-    private static func loadDefaultAudio() -> Data {
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/ping.wav")) {
-            return data
-        }
-        return generateChimeWAV()
+        let ip = Self.getWiFiIP() ?? localIP
+        return "http://\(ip):\(port)/\(endpoint)"
     }
     
     private func handleConnection(_ connection: NWConnection) {
         connection.start(queue: audioQueue)
         
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { [weak self] data, _, _, _ in
-            guard let self = self, let reqData = data, let reqStr = String(data: reqData, encoding: .utf8) else {
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { [weak self] data, _, _, err in
+            guard let self = self else {
+                connection.cancel()
+                return
+            }
+            guard let reqData = data, let reqStr = String(data: reqData, encoding: .utf8) else {
                 connection.cancel()
                 return
             }
             
-            let firstLine = reqStr.components(separatedBy: "\r\n").first ?? ""
-            print("HTTP Request: \(firstLine)")
+            let lines = reqStr.components(separatedBy: "\r\n")
+            let firstLine = lines.first ?? ""
+            let method = firstLine.components(separatedBy: " ").first?.uppercased() ?? "GET"
+            let path = firstLine.components(separatedBy: " ").count > 1 ? firstLine.components(separatedBy: " ")[1] : "/"
             
-            let audioData = self.customAudioData ?? Self.generateChimeWAV()
-            let headers = """
-            HTTP/1.1 200 OK\r
-            Content-Type: audio/wav\r
-            Content-Length: \(audioData.count)\r
-            Accept-Ranges: bytes\r
-            Connection: close\r
-            Access-Control-Allow-Origin: *\r
-            \r\n
-            """
+            LogManager.shared.audio("Incoming HTTP [\(method)] \(path)")
+            
+            let audioData = self.chimeWavData
+            let isHead = method == "HEAD"
+            
+            let headers = [
+                "HTTP/1.1 200 OK",
+                "Content-Type: audio/wav",
+                "Content-Length: \(audioData.count)",
+                "Accept-Ranges: bytes",
+                "Connection: close",
+                "Access-Control-Allow-Origin: *",
+                "Cache-Control: no-cache",
+                "",
+                ""
+            ].joined(separator: "\r\n")
             
             var response = Data(headers.utf8)
-            response.append(audioData)
+            if !isHead {
+                response.append(audioData)
+            }
             
-            connection.send(content: response, completion: .contentProcessed({ _ in
-                connection.cancel()
+            connection.send(content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed({ sendErr in
+                if let e = sendErr {
+                    LogManager.shared.error("AudioServer", "Send error: \(e.localizedDescription)")
+                } else {
+                    LogManager.shared.audio("Successfully dispatched \(response.count) bytes (clean close)")
+                }
+                self.audioQueue.asyncAfter(deadline: .now() + 0.5) {
+                    connection.cancel()
+                }
             }))
         }
     }

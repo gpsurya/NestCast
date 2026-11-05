@@ -48,14 +48,12 @@ public struct MenuBarView: View {
             }
             .padding(.bottom, 2)
             
-            // Now Casting Card (if an active direct session is ongoing)
+            // Active Session Card
             if cast.activeDevice != nil {
                 ActiveSessionView(
                     cast: cast,
                     onTestChime: {
-                        if let dev = cast.activeDevice {
-                            handleTestChime(dev)
-                        }
+                        handlePlayTestSound()
                     },
                     onDisconnect: {
                         cast.disconnect()
@@ -63,48 +61,12 @@ public struct MenuBarView: View {
                 )
             }
             
-            // System Audio Bridge Card
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("System Audio Bridge")
-                                .font(.system(size: 12, weight: .semibold))
-                            
-                            Circle()
-                                .fill(bridge.isRunning ? Color.green : Color.secondary.opacity(0.4))
-                                .frame(width: 7, height: 7)
-                        }
-                        
-                        Text(bridge.isRunning ? "Nest visible in macOS Sound Settings" : "Route entire Mac sound to Nest via AirPlay")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Toggle("", isOn: Binding(
-                        get: { bridge.isRunning },
-                        set: { enable in
-                            if enable {
-                                bridge.startBridge()
-                            } else {
-                                bridge.stopBridge()
-                            }
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                }
-            }
-            .padding(10)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-            .cornerRadius(8)
+            // Available Speakers Section
+            let otherDevices = discovery.devices.filter { $0.id != cast.activeDevice?.id }
             
-            // Discovered Speakers Section
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("SPEAKERS (\(discovery.devices.count))")
+                    Text(cast.activeDevice != nil ? "OTHER SPEAKERS (\(otherDevices.count))" : "AVAILABLE SPEAKERS (\(discovery.devices.count))")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.secondary)
                     
@@ -121,23 +83,25 @@ public struct MenuBarView: View {
                     VStack(spacing: 6) {
                         ProgressView()
                             .scaleEffect(0.7)
-                        Text("Searching for Google Nest Minis...")
+                        Text("Searching for Google Nest Minis on Wi-Fi...")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
+                    .padding(.vertical, 14)
+                } else if otherDevices.isEmpty && cast.activeDevice != nil {
+                    Text("All discovered speakers are in use.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 4)
                 } else {
-                    VStack(spacing: 4) {
-                        ForEach(discovery.devices) { device in
+                    VStack(spacing: 5) {
+                        ForEach(otherDevices) { device in
                             SpeakerRowView(
                                 device: device,
-                                isConnected: cast.activeDevice?.id == device.id,
+                                isConnected: false,
                                 onSelect: {
-                                    handleSpeakerSelect(device)
-                                },
-                                onTestChime: {
-                                    handleTestChime(device)
+                                    handleSpeakerConnect(device)
                                 }
                             )
                         }
@@ -146,11 +110,11 @@ public struct MenuBarView: View {
             }
             
             Divider()
-                .opacity(0.6)
+                .opacity(0.5)
             
             // Footer
             HStack {
-                Text("v1.0.0 • gpsurya")
+                Text("v1.0.1 • gpsurya")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
                 
@@ -167,27 +131,25 @@ public struct MenuBarView: View {
                 .keyboardShortcut("q", modifiers: .command)
             }
         }
-        .padding(12)
-        .frame(width: 310)
+        .padding(14)
+        .frame(width: 320)
     }
     
-    private func handleSpeakerSelect(_ device: CastDevice) {
-        if cast.activeDevice?.id == device.id {
-            cast.disconnect()
-        } else {
-            if !server.isRunning {
-                server.start()
-            }
-            let streamURL = server.streamURL(endpoint: "ping.wav")
-            cast.connect(to: device, streamURL: streamURL)
-        }
-    }
-    
-    private func handleTestChime(_ device: CastDevice) {
+    private func handleSpeakerConnect(_ device: CastDevice) {
         if !server.isRunning {
             server.start()
         }
         let streamURL = server.streamURL(endpoint: "ping.wav")
         cast.connect(to: device, streamURL: streamURL)
+    }
+    
+    private func handlePlayTestSound() {
+        if !server.isRunning {
+            server.start()
+        }
+        if cast.activeDevice != nil {
+            let streamURL = server.streamURL(endpoint: "ping.wav")
+            cast.launchAndLoad(streamURL: streamURL)
+        }
     }
 }

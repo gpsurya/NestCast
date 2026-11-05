@@ -81,6 +81,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             closePopover()
         } else {
+            LogManager.shared.info("UI", "User opened NestCast popover")
             discovery.startDiscovery()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             installClickMonitor()
@@ -88,6 +89,8 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
     }
     
     public func closePopover() {
+        guard popover.isShown else { return }
+        LogManager.shared.info("UI", "NestCast popover closed")
         popover.close()
         removeClickMonitor()
     }

@@ -18,6 +18,7 @@ public class CastProtocol: ObservableObject {
     @Published public var activeDevice: CastDevice?
     @Published public var currentVolume: Float = 0.5
     
+    private var isAdjustingVolume: Bool = false
     private var connection: NWConnection?
     private var heartbeatTimer: Timer?
     private var volumeDebounceTimer: Timer?
@@ -29,7 +30,9 @@ public class CastProtocol: ObservableObject {
         disconnect()
         
         guard let host = device.ipAddress ?? Optional(device.host), !host.isEmpty else {
-            self.state = .error("Invalid device host")
+            let errMsg = "Invalid device host"
+            self.state = .error(errMsg)
+            LogManager.shared.error("CastProtocol", errMsg)
             completion?(false)
             return
         }
@@ -37,6 +40,7 @@ public class CastProtocol: ObservableObject {
         self.activeDevice = device
         self.currentVolume = device.volume
         self.state = .connecting
+        LogManager.shared.cast("Connecting to \(device.name) at \(host):\(device.port)...")
         
         let tlsOpts = NWProtocolTLS.Options()
         sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, comp in
@@ -56,6 +60,7 @@ public class CastProtocol: ObservableObject {
                 guard let self = self else { return }
                 switch connState {
                 case .ready:
+                    LogManager.shared.cast("TLS handshake succeeded with \(device.name)")
                     self.state = .connected
                     self.startHeartbeat()
                     self.sendConnect(destination: "receiver-0")
@@ -69,9 +74,12 @@ public class CastProtocol: ObservableObject {
                     self.listenForMessages()
                     
                 case .failed(let err):
-                    self.state = .error("Connection failed: \(err.localizedDescription)")
+                    let errMsg = "Connection failed: \(err.localizedDescription)"
+                    LogManager.shared.error("CastProtocol", errMsg)
+                    self.state = .error(errMsg)
                     completion?(false)
                 case .cancelled:
+                    LogManager.shared.cast("Connection cancelled")
                     self.state = .disconnected
                 default:
                     break
@@ -83,6 +91,7 @@ public class CastProtocol: ObservableObject {
     }
     
     public func disconnect() {
+        LogManager.shared.cast("Disconnecting active Cast session")
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         volumeDebounceTimer?.invalidate()
@@ -102,14 +111,13 @@ public class CastProtocol: ObservableObject {
     
     public func setVolume(level: Float) {
         let clamped = max(0.0, min(1.0, level))
-        // Immediate local state update so UI slider and percentage respond instantly
+        self.isAdjustingVolume = true
         self.currentVolume = clamped
         if var dev = activeDevice {
             dev.volume = clamped
             activeDevice = dev
         }
         
-        // Debounce socket writes to 20Hz while dragging
         volumeDebounceTimer?.invalidate()
         volumeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -120,6 +128,11 @@ public class CastProtocol: ObservableObject {
                     "requestId": self.nextRequestId()
                 ]
                 self.sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
+                LogManager.shared.cast("Dispatched SET_VOLUME -> \(Int(clamped * 100))%")
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.isAdjustingVolume = false
+                }
             }
         }
     }
@@ -133,18 +146,20 @@ public class CastProtocol: ObservableObject {
     
     public func launchAndLoad(streamURL: String, completion: ((Bool) -> Void)? = nil) {
         state = .launching
+        LogManager.shared.cast("Launching Default Media Receiver (CC1AD845)...")
         let payload: [String: Any] = [
             "type": "LAUNCH",
-            "appId": "CC1AD845", // Default Media Receiver
+            "appId": "CC1AD845",
             "requestId": nextRequestId()
         ]
         
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
         Task {
-            for _ in 0..<25 {
+            for attempt in 1...25 {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if let transportId = self.currentTransportId {
+                    LogManager.shared.cast("Receiver ready (transportId=\(transportId), attempt=\(attempt)). Sending CONNECT and LOAD...")
                     self.sendConnect(destination: transportId)
                     self.loadMedia(transportId: transportId, streamURL: streamURL)
                     self.state = .playing
@@ -153,7 +168,9 @@ public class CastProtocol: ObservableObject {
                 }
             }
             if self.currentTransportId == nil {
-                self.state = .error("Timed out waiting for Media Receiver")
+                let timeoutMsg = "Timed out waiting for Media Receiver launch"
+                LogManager.shared.error("CastProtocol", timeoutMsg)
+                self.state = .error(timeoutMsg)
                 completion?(false)
             }
         }
@@ -162,8 +179,8 @@ public class CastProtocol: ObservableObject {
     private func loadMedia(transportId: String, streamURL: String) {
         let mediaDict: [String: Any] = [
             "contentId": streamURL,
-            "contentType": streamURL.hasSuffix(".wav") ? "audio/wav" : "audio/mp3",
-            "streamType": "LIVE",
+            "contentType": "audio/wav",
+            "streamType": "BUFFERED",
             "metadata": [
                 "metadataType": 3,
                 "title": "Mac System Audio",
@@ -171,7 +188,7 @@ public class CastProtocol: ObservableObject {
             ]
         ]
         
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": "LOAD",
             "requestId": nextRequestId(),
             "autoplay": true,
@@ -179,6 +196,11 @@ public class CastProtocol: ObservableObject {
             "media": mediaDict
         ]
         
+        if let sid = currentSessionId {
+            payload["sessionId"] = sid
+        }
+        
+        LogManager.shared.cast("Dispatching LOAD to \(transportId) with URL: \(streamURL)")
         sendJson(destination: transportId, ns: "urn:x-cast:com.google.cast.media", dict: payload)
     }
     
@@ -223,18 +245,32 @@ public class CastProtocol: ObservableObject {
         let payload = data.advanced(by: 4)
         guard let text = String(data: payload, encoding: .utf8) ?? String(data: payload, encoding: .isoLatin1) else { return }
         
-        // Find all JSON object candidates in the packet
-        var searchRange = text.startIndex..<text.endIndex
-        while let startIdx = text.range(of: "{\"type\":", range: searchRange)?.lowerBound ?? text.range(of: "{\"", range: searchRange)?.lowerBound {
-            guard let endIdx = text.range(of: "}", options: .backwards, range: startIdx..<text.endIndex)?.upperBound else { break }
-            let jsonSub = text[startIdx..<endIdx]
-            if let jsonData = jsonSub.data(using: .utf8),
-               let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                handleJsonMessage(dict)
-                break
+        var searchStart = text.startIndex
+        while let startIdx = text[searchStart...].range(of: "{\"")?.lowerBound {
+            var braceCount = 0
+            var foundEnd: String.Index? = nil
+            var curr = startIdx
+            while curr < text.endIndex {
+                let char = text[curr]
+                if char == "{" {
+                    braceCount += 1
+                } else if char == "}" {
+                    braceCount -= 1
+                    if braceCount == 0 {
+                        foundEnd = text.index(after: curr)
+                        break
+                    }
+                }
+                curr = text.index(after: curr)
             }
-            if endIdx < text.endIndex {
-                searchRange = endIdx..<text.endIndex
+            
+            if let endIdx = foundEnd {
+                let candidate = String(text[startIdx..<endIdx])
+                if let jsonData = candidate.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    handleJsonMessage(dict)
+                }
+                searchStart = endIdx
             } else {
                 break
             }
@@ -242,9 +278,18 @@ public class CastProtocol: ObservableObject {
     }
     
     public func handleJsonMessage(_ dict: [String: Any]) {
-        // 1. Parse Volume updates from RECEIVER_STATUS or multizone
+        let type = dict["type"] as? String ?? ""
+        LogManager.shared.cast("Packet: [\(type)]")
+        
+        if type == "LOAD_FAILED" {
+            LogManager.shared.error("CastProtocol", "LOAD_FAILED: \(dict)")
+            self.state = .error("Speaker rejected media load")
+            return
+        }
+        
         if let status = dict["status"] as? [String: Any] {
-            if let volDict = status["volume"] as? [String: Any],
+            if !isAdjustingVolume,
+               let volDict = status["volume"] as? [String: Any],
                let lvl = volDict["level"] as? Double {
                 let floatLvl = Float(lvl)
                 self.currentVolume = floatLvl
@@ -253,6 +298,7 @@ public class CastProtocol: ObservableObject {
                     self.activeDevice = dev
                 }
             }
+            
             if let apps = status["applications"] as? [[String: Any]],
                let firstApp = apps.first {
                 if let transportId = firstApp["transportId"] as? String {
@@ -262,7 +308,8 @@ public class CastProtocol: ObservableObject {
                     self.currentSessionId = sessionId
                 }
             }
-        } else if let devDict = dict["device"] as? [String: Any],
+        } else if !isAdjustingVolume,
+                  let devDict = dict["device"] as? [String: Any],
                   let volDict = devDict["volume"] as? [String: Any],
                   let lvl = volDict["level"] as? Double {
             let floatLvl = Float(lvl)

@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="NestCast"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.1}"
 ARCH=$(uname -m)
 BUILD_DIR="${NESTCAST_BUILD_DIR:-$PWD/build/release-$VERSION-$ARCH}"
 DIST_DIR="${NESTCAST_DIST_DIR:-$PWD/dist}"

@@ -24,8 +24,14 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>NestCast discovers and streams audio to Google Nest Mini and Chromecast devices on your local Wi-Fi network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>NestCast captures system audio output to cast to your Google Nest Mini speaker.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_googlecast._tcp</string>

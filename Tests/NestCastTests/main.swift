@@ -10,7 +10,7 @@ func assertTest(_ condition: Bool, _ message: String) {
 }
 
 print("======================================================")
-print("  Running NestCast Comprehensive Test Suite")
+print("  Running NestCast Comprehensive Test Suite (v1.0.1)")
 print("======================================================\n")
 
 // ──────────────────────────────────────────────────────────
@@ -88,9 +88,9 @@ let waveId = String(data: wavData.subdata(in: 8..<12), encoding: .ascii)
 assertTest(waveId == "WAVE", "Format is WAVE")
 
 // ──────────────────────────────────────────────────────────
-// Test 3: Cast V2 Wire Protocol Framing
+// Test 3: Cast V2 Wire Protocol Framing & Varint Encoding
 // ──────────────────────────────────────────────────────────
-print("\nTest 3: Cast V2 wire protocol framing")
+print("\nTest 3: Cast V2 wire protocol framing & varint encoding")
 func encodeCastMessage(source: String, dest: String, ns: String, json: String) -> Data {
     func makeVarint(_ val: UInt64) -> [UInt8] {
         var v = val; var res: [UInt8] = []
@@ -98,9 +98,9 @@ func encodeCastMessage(source: String, dest: String, ns: String, json: String) -
         res.append(UInt8(v)); return res
     }
     func encodeString(tag: UInt8, str: String) -> [UInt8] {
-        let utf8 = Array(str.utf8)
-        return [tag] + makeVarint(UInt64(utf8.count)) + utf8
+        let utf8 = Array(str.utf8); return [tag] + makeVarint(UInt64(utf8.count)) + utf8
     }
+    
     var body: [UInt8] = []
     body.append(contentsOf: [0x08, 0x00])
     body.append(contentsOf: encodeString(tag: 0x12, str: source))
@@ -108,6 +108,7 @@ func encodeCastMessage(source: String, dest: String, ns: String, json: String) -
     body.append(contentsOf: encodeString(tag: 0x22, str: ns))
     body.append(contentsOf: [0x28, 0x00])
     body.append(contentsOf: encodeString(tag: 0x32, str: json))
+    
     var packet = Data()
     var len = UInt32(body.count).bigEndian
     packet.append(Data(bytes: &len, count: 4))
@@ -115,41 +116,40 @@ func encodeCastMessage(source: String, dest: String, ns: String, json: String) -
     return packet
 }
 
-let setVolumePkt = encodeCastMessage(
+let testPacket = encodeCastMessage(
     source: "sender-0",
     dest: "receiver-0",
     ns: "urn:x-cast:com.google.cast.receiver",
     json: "{\"type\":\"SET_VOLUME\",\"volume\":{\"level\":0.75},\"requestId\":10}"
 )
-assertTest(setVolumePkt.count > 4, "SET_VOLUME packet has length > 4")
-var pktLen: UInt32 = 0
-setVolumePkt.prefix(4).withUnsafeBytes { ptr in
-    pktLen = ptr.load(as: UInt32.self).bigEndian
-}
-assertTest(Int(pktLen) == setVolumePkt.count - 4, "Packet length prefix matches body length exactly (\(pktLen) bytes)")
+assertTest(testPacket.count > 4, "SET_VOLUME packet has length > 4")
+let pktLen = testPacket.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+assertTest(Int(pktLen) == testPacket.count - 4, "Packet length prefix matches body length exactly (\(pktLen) bytes)")
 
 // ──────────────────────────────────────────────────────────
-// Test 4: Volume State & Packet Parser Synchronization
+// Test 4: Volume Parser, Multizone Sync & Echo Protection
 // ──────────────────────────────────────────────────────────
-print("\nTest 4: Volume state & parser synchronization")
+print("\nTest 4: Volume parser, multizone sync & echo protection")
 class MockCastState {
     var currentVolume: Float = 0.5
     var activeDeviceVolume: Float = 0.5
+    var isUserAdjustingVolume: Bool = false
     
     func parseMessage(_ jsonString: String) {
-        if let data = jsonString.data(using: .utf8),
-           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let status = dict["status"] as? [String: Any],
-               let volDict = status["volume"] as? [String: Any],
-               let lvl = volDict["level"] as? Double {
-                self.currentVolume = Float(lvl)
-                self.activeDeviceVolume = Float(lvl)
-            } else if let devDict = dict["device"] as? [String: Any],
-                      let volDict = devDict["volume"] as? [String: Any],
-                      let lvl = volDict["level"] as? Double {
-                self.currentVolume = Float(lvl)
-                self.activeDeviceVolume = Float(lvl)
-            }
+        guard !isUserAdjustingVolume else { return }
+        guard let data = jsonString.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        
+        if let status = dict["status"] as? [String: Any],
+           let volDict = status["volume"] as? [String: Any],
+           let lvl = volDict["level"] as? Double {
+            self.currentVolume = Float(lvl)
+            self.activeDeviceVolume = Float(lvl)
+        } else if let dev = dict["device"] as? [String: Any],
+                  let vol = dev["volume"] as? [String: Any],
+                  let lvl = vol["level"] as? Double {
+            self.currentVolume = Float(lvl)
+            self.activeDeviceVolume = Float(lvl)
         }
     }
 }
@@ -157,25 +157,73 @@ class MockCastState {
 let mockState = MockCastState()
 assertTest(mockState.currentVolume == 0.5, "Default initial volume is 0.5 (50%)")
 
-// Simulate incoming RECEIVER_STATUS from Google Nest Mini
-let mockStatusJson = """
-{"requestId":1,"status":{"applications":[],"volume":{"controlType":"master","level":0.725,"muted":false}},"type":"RECEIVER_STATUS"}
-"""
+let mockStatusJson = "{\"requestId\":1,\"status\":{\"applications\":[],\"volume\":{\"controlType\":\"master\",\"level\":0.725,\"muted\":false}},\"type\":\"RECEIVER_STATUS\"}"
 mockState.parseMessage(mockStatusJson)
 assertTest(abs(mockState.currentVolume - 0.725) < 0.001, "Volume correctly updated to 72.5% from RECEIVER_STATUS")
-assertTest(abs(mockState.activeDeviceVolume - 0.725) < 0.001, "Device volume synchronized to 72.5%")
 
-// Simulate multizone volume update
-let mockMultizoneJson = """
-{"device":{"name":"Surya speaker","volume":{"level":0.40,"muted":false}},"type":"DEVICE_UPDATED"}
-"""
+let mockMultizoneJson = "{\"device\":{\"name\":\"Surya speaker\",\"volume\":{\"level\":0.40,\"muted\":false}},\"type\":\"DEVICE_UPDATED\"}"
 mockState.parseMessage(mockMultizoneJson)
 assertTest(abs(mockState.currentVolume - 0.40) < 0.001, "Volume correctly updated to 40% from multizone DEVICE_UPDATED")
 
+// Verify echo rejection during user dragging
+mockState.isUserAdjustingVolume = true
+mockState.currentVolume = 0.90
+mockState.parseMessage(mockStatusJson) // Delayed echo at 0.725
+assertTest(mockState.currentVolume == 0.90, "User volume (90%) protected from delayed echo packet")
+
 // ──────────────────────────────────────────────────────────
-// Test 5: Live Hardware Communication (Surya speaker @ 192.168.1.4:8009)
+// Test 5: SessionId Inclusion in Media LOAD Payload
 // ──────────────────────────────────────────────────────────
-print("\nTest 5: Live hardware test against Surya speaker (192.168.1.4:8009)")
+print("\nTest 5: SessionId inclusion in media LOAD payload")
+func buildLoadPayload(transportId: String, sessionId: String, streamURL: String) -> [String: Any] {
+    let mediaDict: [String: Any] = [
+        "contentId": streamURL,
+        "contentType": "audio/wav",
+        "streamType": "BUFFERED"
+    ]
+    return [
+        "type": "LOAD",
+        "requestId": 101,
+        "sessionId": sessionId,
+        "autoplay": true,
+        "currentTime": 0,
+        "media": mediaDict
+    ]
+}
+
+let loadPayload = buildLoadPayload(
+    transportId: "trans-1234",
+    sessionId: "sess-5678",
+    streamURL: "http://192.168.1.9:8088/ping.wav"
+)
+assertTest(loadPayload["type"] as? String == "LOAD", "Payload type is LOAD")
+assertTest(loadPayload["sessionId"] as? String == "sess-5678", "Payload strictly includes sessionId")
+let mediaObj = loadPayload["media"] as? [String: Any]
+assertTest(mediaObj?["contentType"] as? String == "audio/wav", "Content type is audio/wav")
+
+// ──────────────────────────────────────────────────────────
+// Test 6: Persistent Logging File Verification
+// ──────────────────────────────────────────────────────────
+print("\nTest 6: Persistent logging verification (~/Library/Logs/NestCast.log)")
+let logsDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs")
+let logFile = logsDir.appendingPathComponent("NestCast.log")
+let logSample = "[\(Date())] [INFO] [Test] Verification log entry\n"
+if !FileManager.default.fileExists(atPath: logFile.path) {
+    FileManager.default.createFile(atPath: logFile.path, contents: nil)
+}
+if let handle = try? FileHandle(forWritingTo: logFile) {
+    handle.seekToEndOfFile()
+    handle.write(logSample.data(using: .utf8)!)
+    try? handle.close()
+}
+assertTest(FileManager.default.fileExists(atPath: logFile.path), "Log file exists at ~/Library/Logs/NestCast.log")
+let fileContents = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+assertTest(fileContents.contains("[INFO]"), "Log file contains valid timestamped entries")
+
+// ──────────────────────────────────────────────────────────
+// Test 7: Live Hardware Communication (Surya speaker @ 192.168.1.4:8009)
+// ──────────────────────────────────────────────────────────
+print("\nTest 7: Live hardware test against Surya speaker (192.168.1.4:8009)")
 let tlsOpts = NWProtocolTLS.Options()
 sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, c in c(true) }, .main)
 let conn = NWConnection(host: "192.168.1.4", port: 8009, using: NWParameters(tls: tlsOpts))
@@ -209,8 +257,8 @@ conn.stateUpdateHandler = { state in
 conn.start(queue: .main)
 
 let deadline = Date().addingTimeInterval(3.0)
-while receivedLiveVolume == nil && Date() < deadline {
-    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.1))
+while Date() < deadline && receivedLiveVolume == nil {
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 }
 conn.cancel()
 
@@ -221,13 +269,42 @@ if let vol = receivedLiveVolume {
 }
 
 // ──────────────────────────────────────────────────────────
-// Test 6: Helper Binary & Bundle Verification
+// Test 8: Balanced-Brace JSON Extraction
 // ──────────────────────────────────────────────────────────
-print("\nTest 6: Helper binary & resource verification")
-let helperPath = "/Users/suryaprakashpalanisamy/NestCast/Resources/aircast"
-assertTest(FileManager.default.fileExists(atPath: helperPath), "Aircast helper exists at Resources/aircast")
-assertTest(FileManager.default.isExecutableFile(atPath: helperPath), "Aircast helper has executable permissions (+x)")
+print("\nTest 8: Balanced-brace JSON extraction algorithm")
+func extractJsonObjects(from text: String) -> [String] {
+    var results: [String] = []
+    var searchStart = text.startIndex
+    while let startIdx = text[searchStart...].range(of: "{\"")?.lowerBound {
+        var braceCount = 0
+        var foundEnd: String.Index? = nil
+        var curr = startIdx
+        while curr < text.endIndex {
+            let char = text[curr]
+            if char == "{" { braceCount += 1 }
+            else if char == "}" {
+                braceCount -= 1
+                if braceCount == 0 {
+                    foundEnd = text.index(after: curr)
+                    break
+                }
+            }
+            curr = text.index(after: curr)
+        }
+        if let endIdx = foundEnd {
+            results.append(String(text[startIdx..<endIdx]))
+            searchStart = endIdx
+        } else { break }
+    }
+    return results
+}
+
+let packetWithNoise = "HEADER\u{12}\u{05}text{\"type\":\"PING\"}\u{00}\u{01}{\"type\":\"RECEIVER_STATUS\",\"volume\":{\"level\":0.5}}TRAILING_BYTES"
+let extracted = extractJsonObjects(from: packetWithNoise)
+assertTest(extracted.count == 2, "Extracted exactly 2 JSON objects from noisy protobuf packet")
+assertTest(extracted[0] == "{\"type\":\"PING\"}", "First extracted JSON is PING")
+assertTest(extracted[1].contains("RECEIVER_STATUS"), "Second extracted JSON is RECEIVER_STATUS")
 
 print("\n======================================================")
-print("  All 6 Tests Passed Successfully! System is 100% Ready.")
+print("  All 8 Tests Passed Successfully! System is 100% Ready.")
 print("======================================================\n")

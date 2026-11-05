@@ -4,6 +4,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Prevent macOS from killing the app when windows close or focus changes
+        ProcessInfo.processInfo.disableAutomaticTermination("NestCast menu bar resident service")
+        ProcessInfo.processInfo.disableSuddenTermination()
+        
+        LogManager.shared.info("Lifecycle", "applicationDidFinishLaunching - Initializing services")
         NSApp.setActivationPolicy(.accessory)
         
         let discovery = CastDiscovery()
@@ -18,10 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             server: server
         )
         discovery.startDiscovery()
+        LogManager.shared.info("Lifecycle", "NestCast initialized and scanning for speakers")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // App will terminate cleanly
+        LogManager.shared.info("Lifecycle", "applicationWillTerminate received - Cleaning up")
     }
 }
 

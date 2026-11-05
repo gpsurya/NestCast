@@ -4,18 +4,15 @@ public struct SpeakerRowView: View {
     public let device: CastDevice
     public let isConnected: Bool
     public let onSelect: () -> Void
-    public let onTestChime: () -> Void
     
     public init(
         device: CastDevice,
         isConnected: Bool,
-        onSelect: @escaping () -> Void,
-        onTestChime: @escaping () -> Void
+        onSelect: @escaping () -> Void
     ) {
         self.device = device
         self.isConnected = isConnected
         self.onSelect = onSelect
-        self.onTestChime = onTestChime
     }
     
     public var body: some View {
@@ -23,15 +20,15 @@ public struct SpeakerRowView: View {
             // Speaker Icon Badge
             ZStack {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(isConnected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.12))
-                    .frame(width: 28, height: 28)
+                    .fill(isConnected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.10))
+                    .frame(width: 30, height: 30)
                 
                 Image(systemName: isConnected ? "speaker.wave.3.fill" : "speaker.wave.2")
                     .font(.system(size: 13))
                     .foregroundColor(isConnected ? .accentColor : .primary)
             }
             
-            // Name & Subtitle
+            // Name & Details
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name)
                     .font(.system(size: 12, weight: isConnected ? .semibold : .medium))
@@ -56,36 +53,26 @@ public struct SpeakerRowView: View {
             
             Spacer()
             
-            // Action Buttons
-            HStack(spacing: 6) {
-                Button(action: onTestChime) {
-                    Image(systemName: "bell.fill")
-                        .font(.system(size: 10))
+            // Cast / Active Button
+            if isConnected {
+                Button(action: onSelect) {
+                    Text("Casting")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            } else {
+                Button(action: onSelect) {
+                    Text("Cast")
+                        .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Play test chime on speaker")
-                
-                if isConnected {
-                    Button(action: onSelect) {
-                        Text("Active")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                } else {
-                    Button(action: onSelect) {
-                        Text("Cast")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
             }
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
-        .background(isConnected ? Color.accentColor.opacity(0.06) : Color.clear)
-        .cornerRadius(6)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .background(isConnected ? Color.accentColor.opacity(0.06) : Color(nsColor: .controlBackgroundColor).opacity(0.4))
+        .cornerRadius(7)
     }
 }

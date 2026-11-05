@@ -24,7 +24,7 @@ public struct ActiveSessionView: View {
                         .fill(Color.green)
                         .frame(width: 8, height: 8)
                     
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("NOW CASTING")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.secondary)
@@ -46,10 +46,10 @@ public struct ActiveSessionView: View {
                 }
                 
                 Divider()
-                    .opacity(0.5)
+                    .opacity(0.4)
                 
-                // Volume Slider Row
-                VStack(alignment: .leading, spacing: 4) {
+                // Volume Slider Section
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("SPEAKER VOLUME")
                             .font(.system(size: 9, weight: .bold))
@@ -58,9 +58,9 @@ public struct ActiveSessionView: View {
                         Spacer()
                         
                         Text("\(Int(cast.currentVolume * 100))%")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundColor(.primary)
-                            .frame(width: 38, alignment: .trailing)
+                            .frame(width: 42, alignment: .trailing)
                     }
                     
                     HStack(spacing: 8) {
@@ -86,12 +86,12 @@ public struct ActiveSessionView: View {
                     }
                 }
                 
-                // Test Sound Button
+                // Quick Test Sound Action
                 Button(action: onTestChime) {
                     HStack(spacing: 6) {
                         Image(systemName: "bell.fill")
                             .font(.system(size: 10))
-                        Text("Play Test Chime")
+                        Text("Play Test Sound on Speaker")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
@@ -99,11 +99,11 @@ public struct ActiveSessionView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            .padding(10)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.85))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+                    .stroke(Color.accentColor.opacity(0.25), lineWidth: 1)
             )
             .cornerRadius(8)
         }
