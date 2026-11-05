@@ -199,46 +199,19 @@ public class CastProtocol: ObservableObject {
     }
     
     private func parseIncomingPacket(_ data: Data) {
-        // Strip 4-byte length prefix
         guard data.count > 4 else { return }
-        let payload = data.advanced(by: 4)
         
-        // Find field 6 (tag 0x32 = JSON string)
-        let bytes = Array(payload)
-        var i = 0
-        while i < bytes.count {
-            let tag = bytes[i]
-            let fieldNum = tag >> 3
-            let wireType = tag & 0x07
-            i += 1
-            
-            if wireType == 0 { // Varint
-                while i < bytes.count && (bytes[i] & 0x80) != 0 { i += 1 }
-                i += 1
-            } else if wireType == 2 { // Length-delimited
-                var len: UInt64 = 0
-                var shift: UInt64 = 0
-                while i < bytes.count {
-                    let b = bytes[i]
-                    i += 1
-                    len |= UInt64(b & 0x7F) << shift
-                    if (b & 0x80) == 0 { break }
-                    shift += 7
-                }
-                let intLen = Int(len)
-                if fieldNum == 6 && i + intLen <= bytes.count {
-                    let jsonBytes = bytes[i..<(i + intLen)]
-                    if let jsonStr = String(bytes: jsonBytes, encoding: .utf8),
-                       let data = jsonStr.data(using: .utf8),
-                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        handleJsonMessage(dict)
-                    }
-                }
-                i += intLen
-            } else {
-                break
-            }
-        }
+        let payload = data.advanced(by: 4)
+        guard let text = String(data: payload, encoding: .utf8) ?? String(data: payload, encoding: .isoLatin1) else { return }
+        
+        guard let startIdx = text.range(of: "{\"")?.lowerBound,
+              let endIdx = text.range(of: "}", options: .backwards)?.upperBound else { return }
+        
+        let jsonSub = text[startIdx..<endIdx]
+        guard let jsonData = jsonSub.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
+        
+        handleJsonMessage(dict)
     }
     
     private func handleJsonMessage(_ dict: [String: Any]) {

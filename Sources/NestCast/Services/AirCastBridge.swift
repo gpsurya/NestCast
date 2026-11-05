@@ -30,6 +30,10 @@ public class AirCastBridge: ObservableObject {
         
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 Task { @MainActor [weak self] in
                     let lines = str.components(separatedBy: .newlines).filter { !$0.isEmpty }
