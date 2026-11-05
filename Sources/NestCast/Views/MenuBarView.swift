@@ -136,20 +136,12 @@ public struct MenuBarView: View {
     }
     
     private func handleSpeakerConnect(_ device: CastDevice) {
-        if !server.isRunning {
-            server.start()
-        }
-        let streamURL = server.streamURL(endpoint: "ping.wav")
-        cast.connect(to: device, streamURL: streamURL)
+        cast.connect(to: device)
     }
     
     private func handlePlayTestSound() {
-        if !server.isRunning {
-            server.start()
-        }
         if cast.activeDevice != nil {
-            let streamURL = server.streamURL(endpoint: "ping.wav")
-            cast.launchAndLoad(streamURL: streamURL)
+            cast.playChime()
         }
     }
 }

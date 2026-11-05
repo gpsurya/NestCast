@@ -176,14 +176,30 @@ public class CastProtocol: ObservableObject {
         }
     }
     
+    public func playChime(completion: ((Bool) -> Void)? = nil) {
+        let chimeURL = "https://actions.google.com/sounds/v1/alarms/medium_bell_ringing_near.ogg"
+        launchAndLoad(streamURL: chimeURL, completion: completion)
+    }
+    
     private func loadMedia(transportId: String, streamURL: String) {
+        let mimeType: String
+        if streamURL.hasSuffix(".ogg") {
+            mimeType = "audio/ogg"
+        } else if streamURL.hasSuffix(".mp3") {
+            mimeType = "audio/mp3"
+        } else if streamURL.hasSuffix(".m4a") || streamURL.hasSuffix(".mp4") {
+            mimeType = "audio/mp4"
+        } else {
+            mimeType = "audio/ogg"
+        }
+        
         let mediaDict: [String: Any] = [
             "contentId": streamURL,
-            "contentType": "audio/wav",
+            "contentType": mimeType,
             "streamType": "BUFFERED",
             "metadata": [
                 "metadataType": 3,
-                "title": "Mac System Audio",
+                "title": "NestCast Chime",
                 "artist": "NestCast"
             ]
         ]

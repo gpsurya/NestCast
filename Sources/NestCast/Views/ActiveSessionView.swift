@@ -98,6 +98,26 @@ public struct ActiveSessionView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                
+                // Browser Music Streaming Hint
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.accentColor)
+                        Text("BROWSER STREAMING")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                    }
+                    Text("In Chrome / Brave: Click 3 dots → Cast... → choose \(device.name) to stream YouTube & Spotify directly over Wi-Fi.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(6)
             }
             .padding(12)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.85))

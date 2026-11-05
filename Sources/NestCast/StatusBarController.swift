@@ -11,8 +11,6 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
     private let cast: CastProtocol
     private let bridge: AirCastBridge
     private let server: AudioStreamServer
-    
-    private var globalClickMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
     
     public init(
@@ -79,12 +77,12 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
     @objc public func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
-            closePopover()
+            LogManager.shared.info("UI", "Closing NestCast popover")
+            popover.close()
         } else {
-            LogManager.shared.info("UI", "User opened NestCast popover")
+            LogManager.shared.info("UI", "Opening NestCast popover")
             discovery.startDiscovery()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            installClickMonitor()
         }
     }
     
@@ -92,24 +90,9 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         guard popover.isShown else { return }
         LogManager.shared.info("UI", "NestCast popover closed")
         popover.close()
-        removeClickMonitor()
-    }
-    
-    private func installClickMonitor() {
-        removeClickMonitor()
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.closePopover()
-        }
-    }
-    
-    private func removeClickMonitor() {
-        if let monitor = globalClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalClickMonitor = nil
-        }
     }
     
     public func popoverDidClose(_ notification: Notification) {
-        removeClickMonitor()
+        LogManager.shared.info("UI", "popoverDidClose notification received")
     }
 }
