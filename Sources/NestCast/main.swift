@@ -1,4 +1,5 @@
 import AppKit
+import NestCastKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?

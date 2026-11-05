@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 APP_NAME="NestCast"
 BUNDLE_ID="com.gpsurya.NestCast"
-VERSION="${VERSION:-1.0.3}"
+VERSION="${VERSION:-1.0.4}"
 ARCH=$(uname -m)
 BUILD_DIR="${NESTCAST_BUILD_DIR:-$(pwd)/build}"
 APP="$BUILD_DIR/$APP_NAME.app"
@@ -28,13 +28,11 @@ cp Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 
 # Copy helper resources
-if [ -f Resources/aircast ]; then
-    cp Resources/aircast "$APP/Contents/Resources/aircast"
-    chmod +x "$APP/Contents/Resources/aircast"
-fi
-
-if [ -f /tmp/ping.wav ]; then
-    cp /tmp/ping.wav "$APP/Contents/Resources/ping.wav"
+if [ -d Resources ]; then
+    cp Resources/* "$APP/Contents/Resources/" 2>/dev/null || true
+    if [ -f "$APP/Contents/Resources/aircast" ]; then
+        chmod +x "$APP/Contents/Resources/aircast"
+    fi
 fi
 
 # Codesign with ad-hoc signature

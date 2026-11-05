@@ -6,8 +6,111 @@ public enum CastState: Equatable {
     case connecting
     case connected
     case launching
+    case loading
+    case buffering
     case playing
     case error(String)
+}
+
+public struct CastProtobufMessage {
+    public let protocolVersion: Int
+    public let sourceId: String
+    public let destinationId: String
+    public let namespace: String
+    public let payloadType: Int
+    public let payloadUtf8: String?
+    public let payloadBinary: Data?
+}
+
+public enum ProtobufDecoder {
+    public static func decodeCastMessage(from data: Data) -> CastProtobufMessage? {
+        guard !data.isEmpty else { return nil }
+        var cursor = 0
+        var protocolVersion = 0
+        var sourceId = ""
+        var destinationId = ""
+        var namespace = ""
+        var payloadType = 0
+        var payloadUtf8: String?
+        var payloadBinary: Data?
+        
+        func readVarint() -> UInt64? {
+            var value: UInt64 = 0
+            var shift: UInt64 = 0
+            while cursor < data.count {
+                let byte = data[cursor]
+                cursor += 1
+                value |= UInt64(byte & 0x7F) << shift
+                if (byte & 0x80) == 0 {
+                    return value
+                }
+                shift += 7
+                if shift >= 64 { return nil }
+            }
+            return nil
+        }
+        
+        while cursor < data.count {
+            guard let key = readVarint() else { break }
+            let fieldNumber = key >> 3
+            let wireType = key & 0x07
+            
+            switch (fieldNumber, wireType) {
+            case (1, 0): // protocol_version (varint)
+                if let v = readVarint() { protocolVersion = Int(v) }
+            case (2, 2): // source_id (string)
+                if let len = readVarint(), cursor + Int(len) <= data.count {
+                    sourceId = String(data: data.subdata(in: cursor..<(cursor + Int(len))), encoding: .utf8) ?? ""
+                    cursor += Int(len)
+                }
+            case (3, 2): // destination_id (string)
+                if let len = readVarint(), cursor + Int(len) <= data.count {
+                    destinationId = String(data: data.subdata(in: cursor..<(cursor + Int(len))), encoding: .utf8) ?? ""
+                    cursor += Int(len)
+                }
+            case (4, 2): // namespace (string)
+                if let len = readVarint(), cursor + Int(len) <= data.count {
+                    namespace = String(data: data.subdata(in: cursor..<(cursor + Int(len))), encoding: .utf8) ?? ""
+                    cursor += Int(len)
+                }
+            case (5, 0): // payload_type (varint)
+                if let v = readVarint() { payloadType = Int(v) }
+            case (6, 2): // payload_utf8 (string)
+                if let len = readVarint(), cursor + Int(len) <= data.count {
+                    payloadUtf8 = String(data: data.subdata(in: cursor..<(cursor + Int(len))), encoding: .utf8)
+                    cursor += Int(len)
+                }
+            case (7, 2): // payload_binary (bytes)
+                if let len = readVarint(), cursor + Int(len) <= data.count {
+                    payloadBinary = data.subdata(in: cursor..<(cursor + Int(len)))
+                    cursor += Int(len)
+                }
+            default:
+                switch wireType {
+                case 0:
+                    _ = readVarint()
+                case 1:
+                    cursor += 8
+                case 2:
+                    if let len = readVarint() { cursor += Int(len) }
+                case 5:
+                    cursor += 4
+                default:
+                    return nil
+                }
+            }
+        }
+        
+        return CastProtobufMessage(
+            protocolVersion: protocolVersion,
+            sourceId: sourceId,
+            destinationId: destinationId,
+            namespace: namespace,
+            payloadType: payloadType,
+            payloadUtf8: payloadUtf8,
+            payloadBinary: payloadBinary
+        )
+    }
 }
 
 @MainActor
@@ -15,6 +118,7 @@ public class CastProtocol: ObservableObject {
     @Published public var state: CastState = .disconnected
     @Published public var currentTransportId: String?
     @Published public var currentSessionId: String?
+    @Published public var currentMediaSessionId: Int?
     @Published public var activeDevice: CastDevice?
     @Published public var currentVolume: Float = 0.5
     
@@ -24,7 +128,11 @@ public class CastProtocol: ObservableObject {
     private var heartbeatTimer: Timer?
     private var volumeDebounceTimer: Timer?
     private var volumeSettleTimer: Timer?
+    
+    private var sessionGeneration: Int = 0
     private var onReceiverReady: ((String) -> Void)?
+    private var pendingLoadCompletion: ((Bool) -> Void)?
+    private var pendingLoadRequestId: Int?
     
     private var requestId: Int = 1
     private let reqLock = NSLock()
@@ -38,6 +146,9 @@ public class CastProtocol: ObservableObject {
     public func connect(to device: CastDevice, streamURL: String? = nil, completion: ((Bool) -> Void)? = nil) {
         disconnect()
         
+        sessionGeneration += 1
+        let currentGen = sessionGeneration
+        
         guard let host = device.ipAddress ?? Optional(device.host), !host.isEmpty else {
             let errMsg = "Invalid device host"
             self.state = .error(errMsg)
@@ -49,10 +160,9 @@ public class CastProtocol: ObservableObject {
         self.activeDevice = device
         self.currentVolume = device.volume
         self.state = .connecting
-        LogManager.shared.cast("Connecting to \(device.name) at \(host):\(device.port)...")
+        LogManager.shared.cast("Connecting to \(device.name) at \(host):\(device.port) (session #\(currentGen))...")
         
         let tlsOpts = NWProtocolTLS.Options()
-        // Dedicated queue for TLS verification to avoid blocking .main
         sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, _, comp in
             comp(true)
         }, tlsQueue)
@@ -68,7 +178,7 @@ public class CastProtocol: ObservableObject {
         
         conn.stateUpdateHandler = { [weak self] connState in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.sessionGeneration == currentGen else { return }
                 switch connState {
                 case .ready:
                     LogManager.shared.cast("TLS handshake succeeded with \(device.name)")
@@ -90,8 +200,10 @@ public class CastProtocol: ObservableObject {
                     self.state = .error(errMsg)
                     completion?(false)
                 case .cancelled:
-                    LogManager.shared.cast("Connection cancelled")
-                    self.state = .disconnected
+                    if self.state != .disconnected {
+                        LogManager.shared.cast("Connection cancelled")
+                        self.state = .disconnected
+                    }
                 default:
                     break
                 }
@@ -102,7 +214,8 @@ public class CastProtocol: ObservableObject {
     }
     
     public func disconnect(completion: (() -> Void)? = nil) {
-        LogManager.shared.cast("Disconnecting active Cast session instantly")
+        sessionGeneration += 1
+        LogManager.shared.cast("Disconnecting active Cast session")
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         volumeDebounceTimer?.invalidate()
@@ -112,25 +225,44 @@ public class CastProtocol: ObservableObject {
         isAdjustingVolume = false
         onReceiverReady = nil
         
+        if let pending = pendingLoadCompletion {
+            self.pendingLoadCompletion = nil
+            pending(false)
+        }
+        
         let conn = self.connection
         let transId = self.currentTransportId
+        let sessId = self.currentSessionId
+        let mediaSessId = self.currentMediaSessionId
         
-        // Immediately notify speaker hardware to halt playback and drop media buffers
-        if let transportId = transId {
-            sendStop(destination: transportId)
+        // 1. Send valid media STOP with mediaSessionId to active transport
+        if let transportId = transId, let mediaId = mediaSessId {
+            sendJson(destination: transportId, ns: "urn:x-cast:com.google.cast.media", dict: [
+                "type": "STOP",
+                "mediaSessionId": mediaId,
+                "requestId": nextRequestId()
+            ])
             sendClose(destination: transportId)
         }
-        sendStop(destination: "receiver-0")
+        
+        // 2. Send application STOP to receiver-0 with sessionId
+        if let sessionId = sessId {
+            sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: [
+                "type": "STOP",
+                "sessionId": sessionId,
+                "requestId": nextRequestId()
+            ])
+        }
         sendClose(destination: "receiver-0")
         
         self.connection = nil
         self.currentTransportId = nil
         self.currentSessionId = nil
+        self.currentMediaSessionId = nil
         self.activeDevice = nil
         self.tcpBuffer.removeAll()
         self.state = .disconnected
         
-        // Give 120ms for STOP and CLOSE packets to flush through TLS socket before cancellation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             conn?.cancel()
             completion?()
@@ -183,17 +315,21 @@ public class CastProtocol: ObservableObject {
     
     public func launchAndLoad(streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio", completion: ((Bool) -> Void)? = nil) {
         state = .launching
-        // Clear any stale transport/session ID from prior sessions to prevent race conditions
         self.currentTransportId = nil
         self.currentSessionId = nil
+        self.currentMediaSessionId = nil
+        
+        let gen = sessionGeneration
+        self.pendingLoadCompletion = completion
+        let loadReqId = nextRequestId()
+        self.pendingLoadRequestId = loadReqId
         
         let dispatchLoad = { [weak self] (transportId: String) in
-            guard let self = self else { return }
-            LogManager.shared.cast("Receiver ready (transportId=\(transportId)). Dispatching CONNECT and LOAD immediately...")
+            guard let self = self, self.sessionGeneration == gen else { return }
+            LogManager.shared.cast("Default Media Receiver ready (transportId=\(transportId)). Dispatching CONNECT and LOAD...")
             self.sendConnect(destination: transportId)
-            self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title)
-            self.state = .playing
-            completion?(true)
+            self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title, requestId: loadReqId)
+            self.state = .loading
         }
         
         self.onReceiverReady = dispatchLoad
@@ -207,17 +343,18 @@ public class CastProtocol: ObservableObject {
         
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
-        // Safety timeout fallback (6s) in case network packets are dropped
+        // Safety timeout fallback (8s)
         Task {
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            if self.onReceiverReady != nil {
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard self.sessionGeneration == gen else { return }
+            if self.onReceiverReady != nil || (self.state != .playing && self.pendingLoadCompletion != nil) {
                 self.onReceiverReady = nil
-                if self.currentTransportId == nil {
-                    let timeoutMsg = "Timed out waiting for Media Receiver launch"
-                    LogManager.shared.error("CastProtocol", timeoutMsg)
-                    self.state = .error(timeoutMsg)
-                    completion?(false)
-                }
+                let timeoutMsg = "Timed out waiting for speaker to start playback"
+                LogManager.shared.error("CastProtocol", timeoutMsg)
+                self.state = .error(timeoutMsg)
+                let comp = self.pendingLoadCompletion
+                self.pendingLoadCompletion = nil
+                comp?(false)
             }
         }
     }
@@ -227,13 +364,13 @@ public class CastProtocol: ObservableObject {
         launchAndLoad(streamURL: soundURL, streamType: "BUFFERED", title: "NestCast Chime", completion: completion)
     }
     
-    private func loadMedia(transportId: String, streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio") {
+    private func loadMedia(transportId: String, streamURL: String, streamType: String = "LIVE", title: String = "Mac Desktop Audio", requestId: Int) {
         let mimeType: String
-        if streamURL.contains("live.mp3") || streamURL.hasSuffix(".mp3") {
+        if streamURL.contains("live.mp3") || streamURL.contains(".mp3") {
             mimeType = "audio/mpeg"
-        } else if streamURL.hasSuffix(".ogg") {
+        } else if streamURL.contains(".ogg") {
             mimeType = "audio/ogg"
-        } else if streamURL.hasSuffix(".m4a") || streamURL.hasSuffix(".mp4") {
+        } else if streamURL.contains(".m4a") || streamURL.contains(".mp4") {
             mimeType = "audio/mp4"
         } else {
             mimeType = "audio/mpeg"
@@ -252,7 +389,7 @@ public class CastProtocol: ObservableObject {
         
         var payload: [String: Any] = [
             "type": "LOAD",
-            "requestId": nextRequestId(),
+            "requestId": requestId,
             "autoplay": true,
             "currentTime": 0,
             "media": mediaDict
@@ -262,19 +399,12 @@ public class CastProtocol: ObservableObject {
             payload["sessionId"] = sid
         }
         
-        LogManager.shared.cast("Dispatching LOAD (\(streamType)) to \(transportId) with URL: \(streamURL)")
+        LogManager.shared.cast("Dispatching LOAD (\(streamType), req #\(requestId)) to \(transportId) with URL: \(streamURL)")
         sendJson(destination: transportId, ns: "urn:x-cast:com.google.cast.media", dict: payload)
     }
     
     private func sendConnect(destination: String) {
         sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.tp.connection", dict: ["type": "CONNECT"])
-    }
-    
-    private func sendStop(destination: String) {
-        sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.media", dict: [
-            "type": "STOP",
-            "requestId": nextRequestId()
-        ])
     }
     
     private func sendClose(destination: String) {
@@ -283,19 +413,22 @@ public class CastProtocol: ObservableObject {
     
     private func startHeartbeat() {
         heartbeatTimer?.invalidate()
+        let gen = sessionGeneration
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.tp.heartbeat", dict: ["type": "PING"])
+                guard let self = self, self.sessionGeneration == gen else { return }
+                self.sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.tp.heartbeat", dict: ["type": "PING"])
             }
         }
     }
     
     private func listenForMessages() {
         guard let conn = connection else { return }
+        let gen = sessionGeneration
         
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, err in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.sessionGeneration == gen else { return }
                 if let d = data, !d.isEmpty {
                     self.tcpBuffer.append(d)
                     self.processTcpBuffer()
@@ -317,55 +450,31 @@ public class CastProtocol: ObservableObject {
             let totalPacketSize = 4 + frameLength
             
             guard tcpBuffer.count >= totalPacketSize else {
-                // Incomplete frame; wait for next TCP chunk
                 break
             }
             
             let packetData = tcpBuffer.subdata(in: 4..<totalPacketSize)
             tcpBuffer.removeSubrange(0..<totalPacketSize)
-            parsePacketData(packetData)
+            parseProtobufPacket(packetData)
         }
     }
     
-    private func parsePacketData(_ payload: Data) {
-        guard let text = String(data: payload, encoding: .utf8) ?? String(data: payload, encoding: .isoLatin1) else { return }
+    private func parseProtobufPacket(_ payload: Data) {
+        guard let msg = ProtobufDecoder.decodeCastMessage(from: payload) else {
+            return
+        }
         
-        var searchStart = text.startIndex
-        while let startIdx = text[searchStart...].range(of: "{\"")?.lowerBound {
-            var braceCount = 0
-            var foundEnd: String.Index? = nil
-            var curr = startIdx
-            while curr < text.endIndex {
-                let char = text[curr]
-                if char == "{" {
-                    braceCount += 1
-                } else if char == "}" {
-                    braceCount -= 1
-                    if braceCount == 0 {
-                        foundEnd = text.index(after: curr)
-                        break
-                    }
-                }
-                curr = text.index(after: curr)
-            }
-            
-            if let endIdx = foundEnd {
-                let candidate = String(text[startIdx..<endIdx])
-                if let jsonData = candidate.data(using: .utf8),
-                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                    handleJsonMessage(dict)
-                }
-                searchStart = endIdx
-            } else {
-                break
-            }
+        if let jsonStr = msg.payloadUtf8,
+           let jsonData = jsonStr.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            handleJsonMessage(dict)
         }
     }
     
     public func handleJsonMessage(_ dict: [String: Any]) {
         let type = dict["type"] as? String ?? ""
         if type == "MEDIA_STATUS" {
-            LogManager.shared.cast("Packet [MEDIA_STATUS]: \(dict)")
+            LogManager.shared.cast("Packet [MEDIA_STATUS]")
         } else {
             LogManager.shared.cast("Packet: [\(type)]")
         }
@@ -373,7 +482,47 @@ public class CastProtocol: ObservableObject {
         if type == "LOAD_FAILED" {
             LogManager.shared.error("CastProtocol", "LOAD_FAILED: \(dict)")
             self.state = .error("Speaker rejected media load")
+            if let comp = self.pendingLoadCompletion {
+                self.pendingLoadCompletion = nil
+                comp(false)
+            }
             return
+        }
+        
+        if type == "MEDIA_STATUS", let statusList = dict["status"] as? [[String: Any]] {
+            for status in statusList {
+                if let mediaId = status["mediaSessionId"] as? Int {
+                    self.currentMediaSessionId = mediaId
+                }
+                
+                let playerState = status["playerState"] as? String ?? ""
+                let idleReason = status["idleReason"] as? String
+                
+                LogManager.shared.cast("Speaker Media Status: playerState=\(playerState) idleReason=\(idleReason ?? "none")")
+                
+                switch playerState {
+                case "PLAYING":
+                    self.state = .playing
+                    if let comp = self.pendingLoadCompletion {
+                        self.pendingLoadCompletion = nil
+                        comp(true)
+                    }
+                case "BUFFERING":
+                    self.state = .buffering
+                case "LOADING":
+                    self.state = .loading
+                case "IDLE":
+                    if idleReason == "ERROR" {
+                        self.state = .error("Playback terminated due to error on speaker")
+                        if let comp = self.pendingLoadCompletion {
+                            self.pendingLoadCompletion = nil
+                            comp(false)
+                        }
+                    }
+                default:
+                    break
+                }
+            }
         }
         
         if let status = dict["status"] as? [String: Any] {
@@ -388,16 +537,17 @@ public class CastProtocol: ObservableObject {
                 }
             }
             
+            // Strictly match Default Media Receiver appId CC1AD845 to avoid grabbing stale applications
             if let apps = status["applications"] as? [[String: Any]],
-               let firstApp = apps.first {
-                if let transportId = firstApp["transportId"] as? String {
+               let mediaApp = apps.first(where: { ($0["appId"] as? String) == "CC1AD845" }) {
+                if let transportId = mediaApp["transportId"] as? String {
                     self.currentTransportId = transportId
                     if let callback = self.onReceiverReady {
                         self.onReceiverReady = nil
                         callback(transportId)
                     }
                 }
-                if let sessionId = firstApp["sessionId"] as? String {
+                if let sessionId = mediaApp["sessionId"] as? String {
                     self.currentSessionId = sessionId
                 }
             }

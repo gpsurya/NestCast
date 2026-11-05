@@ -116,6 +116,33 @@ public struct MenuBarView: View {
             Divider()
                 .opacity(0.5)
             
+            // AirPlay Bridge Mode Toggle
+            HStack {
+                Image(systemName: bridge.isRunning ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                    .font(.system(size: 11))
+                    .foregroundColor(bridge.isRunning ? .green : .secondary)
+                Text(bridge.isRunning ? "AirPlay Bridge: Active" : "AirPlay Bridge: Off")
+                    .font(.system(size: 11))
+                    .foregroundColor(bridge.isRunning ? .primary : .secondary)
+                
+                Spacer()
+                
+                Button(bridge.isRunning ? "Stop" : "Enable") {
+                    if bridge.isRunning {
+                        bridge.stopBridge()
+                    } else {
+                        bridge.startBridge()
+                    }
+                }
+                .font(.system(size: 10))
+                .controlSize(.mini)
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 4)
+            
+            Divider()
+                .opacity(0.5)
+            
             // Footer
             HStack {
                 Text("v1.0.3 • gpsurya")

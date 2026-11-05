@@ -94,13 +94,15 @@ public struct ActiveSessionView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "bell.fill")
                             .font(.system(size: 10))
-                        Text("Play Test Sound on Speaker")
+                        Text(streamer.isStreaming ? "Test Sound (Unavailable During Live Stream)" : "Play Test Sound on Speaker")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(streamer.isStreaming)
+                .help(streamer.isStreaming ? "Stop live streaming to play test sound" : "Play a chime test sound on speaker")
                 
                 // Live Desktop Audio Status Card
                 VStack(alignment: .leading, spacing: 4) {

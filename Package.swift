@@ -3,18 +3,24 @@ import PackageDescription
 
 let package = Package(
     name: "NestCast",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "NestCast", targets: ["NestCast"]),
-        .executable(name: "NestCastTests", targets: ["NestCastTests"])
+        .library(name: "NestCastKit", targets: ["NestCastKit"]),
+        .executable(name: "NestCast", targets: ["NestCast"])
     ],
     targets: [
-        .executableTarget(
-            name: "NestCast",
-            path: "Sources/NestCast"
+        .target(
+            name: "NestCastKit",
+            path: "Sources/NestCastKit"
         ),
         .executableTarget(
+            name: "NestCast",
+            dependencies: ["NestCastKit"],
+            path: "Sources/NestCast"
+        ),
+        .testTarget(
             name: "NestCastTests",
+            dependencies: ["NestCastKit"],
             path: "Tests/NestCastTests"
         )
     ]

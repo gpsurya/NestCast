@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/gpsurya/NestCast/releases"><img src="https://img.shields.io/badge/Release-v1.0.3-blue.svg?style=flat-square" alt="Release v1.0.3"/></a>
+  <a href="https://github.com/gpsurya/NestCast/releases"><img src="https://img.shields.io/badge/Release-v1.0.4-blue.svg?style=flat-square" alt="Release v1.0.4"/></a>
   <a href="https://github.com/gpsurya/NestCast/releases"><img src="https://img.shields.io/badge/DMG-Verified%20Apple%20Silicon-green.svg?style=flat-square" alt="DMG Verified"/></a>
-  <img src="https://img.shields.io/badge/macOS-13.0%2B%20(Ventura%2C%20Sonoma%2C%20Sequoia)-informational.svg?style=flat-square" alt="macOS 13+"/>
+  <img src="https://img.shields.io/badge/macOS-14.0%2B%20(Sonoma%2C%20Sequoia)-informational.svg?style=flat-square" alt="macOS 14+"/>
   <img src="https://img.shields.io/badge/Audio-320%20kbps%20CBR%20%E2%80%A2%2048%20kHz-orange.svg?style=flat-square" alt="Audio 320k 48kHz"/>
   <img src="https://img.shields.io/badge/Latency-Sub--second%20(%3C0.8s)-brightgreen.svg?style=flat-square" alt="Latency Sub-second"/>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square" alt="License MIT"/></a>
@@ -35,12 +35,18 @@ macOS natively supports AirPlay, but completely excludes **Google Cast** devices
 - **Studio-Grade 320 kbps CBR MP3 @ 48,000 Hz:** Direct CoreAudio DAC matching with zero resampling distortion or aliasing artifacts. Significantly superior to Bluetooth audio.
 - **Sub-Second Instant Connect & Replay (<0.8s):** Pre-warmed streaming ingress eliminates cold-start process spin-up and edge DNS propagation delays. Connecting or replaying to a speaker takes just ~0.66 seconds.
 - **Low-Latency Host Pipeline:** Audio is captured via SoX using a 1024-sample buffer (~21.3 ms frames at ~40 FPS) and served with `TCP_NODELAY` network socket dispatching, eliminating local Mac buffering lag.
-- **Instant Hardware Disconnect (<0.15s):** Dispatches Cast V2 `STOP` and `CLOSE` frames directly to the media receiver transport before socket closure. The speaker halts audio immediately without playing out leftover memory buffers, and Mac speakers resume playing in 1 ms.
+- **Instant Hardware Disconnect (<0.15s):** Dispatches Cast V2 `STOP` with `mediaSessionId` and receiver `STOP` directly to the media receiver transport before socket closure. The speaker halts audio immediately without playing out leftover memory buffers, and Mac speakers resume playing in 1 ms.
 - **Live Bi-Directional Volume Synchronization:** Interactive menu bar volume slider with intelligent anti-rubber-banding that prevents echo packet overwrites.
-- **Dual-Mode Network Routing (Direct LAN + Zero-Trust Fallback):** Automatically streams over Direct Wi-Fi LAN; seamlessly activates outbound tunnel fallback for managed enterprise laptops subject to stealth-mode packet filters or corporate firewalls.
+- **Direct LAN Primary with Zero-Trust Fallback:** Direct Wi-Fi LAN is always the primary route. Automated outbound tunnel fallback is reserved exclusively for enterprise laptops subject to strict packet filters or firewalls after diagnosing LAN failure.
+- **Random Expiring Session Tokens:** Protects audio streams with random per-session authentication tokens (`?token=<uuid>`) and automatic log redaction (`token=[REDACTED]`).
+- **Strict Protobuf Wire Decoding:** Replaced naive JSON brace counting with a robust binary Protobuf wire decoder (Wire types 0, 1, 2, 5).
+- **True Playback State Tracking:** Listens to physical speaker `MEDIA_STATUS` frames (`BUFFERING`, `PLAYING`, `IDLE ERROR`), correlating request IDs and application IDs (`CC1AD845`) instead of prematurely reporting "playing".
+- **Safe & Idempotent Audio Restoration:** Never hijacks or alters user output on app launch or termination; restores macOS output strictly if NestCast redirected it to BlackHole.
+- **Bounded Slow-Listener Queues:** Disconnects stalled HTTP clients exceeding 15 unacknowledged chunks (~300ms drift) to guarantee zero buffer accumulation.
+- **Automated Log Rotation:** Automatically rotates `~/Library/Logs/NestCast.log` at 2 MB to `NestCast.log.old`.
 - **Zero Third-Party SDK Bloat:** Pure, native Swift implementation of the Google Cast V2 wire protocol (Protobuf framing over TLS on port `8009`).
 - **AirPlay Bridge Mode:** Integrated one-click helper to expose all Google Nest speakers as native macOS AirPlay sound outputs.
-- **Self-Contained Hardware Test Suite:** Built-in test runner that tests and verifies Cast V2 wire protocol, volume synchronization, and live physical speaker communication.
+- **Modern Swift Test Suite:** 10 comprehensive unit tests built on Apple's modern Swift `Testing` framework validating all protocol, audio, and device management layers.
 
 ---
 
@@ -113,7 +119,7 @@ When streaming system audio to a Google Nest Mini or Chromecast, there is an inh
 
 ### Option 1: Drag-and-Drop DMG (Recommended)
 
-1. Download the latest **`NestCast-1.0.3-arm64.dmg`** from the [GitHub Releases](https://github.com/gpsurya/NestCast/releases) page.
+1. Download the latest **`NestCast-1.0.4-arm64.dmg`** from the [GitHub Releases](https://github.com/gpsurya/NestCast/releases) page.
 2. Double-click the DMG and drag **NestCast.app** into your **Applications** folder.
 3. Install the two standard audio helpers via [Homebrew](https://brew.sh) (required for system audio routing and encoding):
    ```bash
@@ -141,10 +147,10 @@ When streaming system audio to a Google Nest Mini or Chromecast, there is an inh
 
 ## Building from Source
 
-NestCast is written in pure Swift 5.9+ using Swift Package Manager.
+NestCast is written in pure Swift 5.9+ / Swift 6 using Swift Package Manager.
 
 ### Prerequisites
-- macOS 13.0 (Ventura) or later
+- macOS 14.0 (Sonoma) or later
 - Xcode Command Line Tools (`xcode-select --install`)
 - `blackhole-2ch` and `sox` installed (`brew install blackhole-2ch sox`)
 
@@ -154,11 +160,11 @@ git clone https://github.com/gpsurya/NestCast.git
 cd NestCast
 ```
 
-### 2. Run Comprehensive Hardware & Protocol Tests
+### 2. Run Comprehensive Unit Test Suite
 ```bash
-swift run NestCastTests
+swift test
 ```
-*Executes all 10 unit and hardware verification suites against live network devices.*
+*Executes all 10 unit tests validating Protobuf decoding, audio synthesis, media status transitions, volume sync, token sanitization, and output restoration.*
 
 ### 3. Build Standalone Application Bundle
 ```bash
@@ -170,7 +176,7 @@ bash build.sh
 ```bash
 bash package.sh
 ```
-*Builds a verified drag-to-Applications DMG at `dist/NestCast-1.0.3-arm64.dmg` with SHA-256 checksum.*
+*Builds a verified drag-to-Applications DMG at `dist/NestCast-1.0.4-arm64.dmg` with SHA-256 checksum.*
 
 ---
 
@@ -178,26 +184,29 @@ bash package.sh
 
 ```
 NestCast/
-├── Package.swift                       # SPM package manifest
+├── Package.swift                       # SPM manifest: NestCastKit library + NestCast app + NestCastTests
 ├── Info.plist                          # Bundle identifier & permission descriptions
 ├── build.sh                            # Automated build & code-signing script
 ├── package.sh                          # DMG disk image creation script
 ├── Resources/
 │   ├── aircast                         # High-performance AirPlay bridge helper
-│   └── chime.ogg                       # Local fallback chime sample
+│   ├── chime.ogg                       # Local fallback chime sample
+│   ├── chime.mp3                       # Fallback MP3 chime
+│   └── ping.wav                        # Test sound sample
 ├── Sources/
-│   └── NestCast/
-│       ├── main.swift                  # Application entrypoint & NSApplicationDelegate
+│   ├── NestCast/
+│   │   └── main.swift                  # Lightweight application entrypoint
+│   └── NestCastKit/                    # Reusable, testable core framework
 │       ├── StatusBarController.swift   # Menu Bar status item & NSPopover manager
 │       ├── Models/
 │       │   └── CastDevice.swift        # Speaker data models & volume properties
 │       ├── Discovery/
 │       │   └── CastDiscovery.swift     # Bonjour mDNS & Eureka REST discovery
 │       ├── Services/
-│       │   ├── AudioDeviceManager.swift    # CoreAudio HAL default output switching
-│       │   ├── DesktopAudioStreamer.swift  # SoX capture & background ingress engine
-│       │   ├── AudioStreamServer.swift     # Real-time HTTP streaming server (TCP_NODELAY)
-│       │   ├── CastProtocol.swift          # Cast V2 Protobuf TLS engine & event dispatcher
+│       │   ├── AudioDeviceManager.swift    # CoreAudio HAL default output switching & safe restore
+│       │   ├── DesktopAudioStreamer.swift  # SoX capture, stderr watchdog & stream management
+│       │   ├── AudioStreamServer.swift     # Real-time HTTP streaming server with session token auth
+│       │   ├── CastProtocol.swift          # Cast V2 Protobuf TLS engine & MEDIA_STATUS state machine
 │       │   ├── AirCastBridge.swift         # AirConnect AirPlay compatibility service
 │       │   └── LogManager.swift            # Rotating file logger (~/Library/Logs/NestCast.log)
 │       └── Views/
@@ -206,10 +215,10 @@ NestCast/
 │           └── ActiveSessionView.swift # Now Casting card, live stats & volume slider
 ├── Tests/
 │   └── NestCastTests/
-│       └── main.swift                  # 10-point test runner & wire protocol verifier
+│       └── NestCastTests.swift         # 10 production unit tests using Swift Testing framework
 └── dist/
-    ├── NestCast-1.0.3-arm64.dmg        # Compiled release installer disk image
-    └── NestCast-1.0.3-arm64.dmg.sha256 # Cryptographic checksum
+    ├── NestCast-1.0.4-arm64.dmg        # Compiled release installer disk image
+    └── NestCast-1.0.4-arm64.dmg.sha256 # Cryptographic checksum
 ```
 
 ---

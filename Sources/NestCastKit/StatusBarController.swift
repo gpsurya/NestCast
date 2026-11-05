@@ -28,9 +28,6 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         setupPopover()
         setupStatusButton()
         observeStateChanges()
-        
-        // Pre-warm zero-trust streaming ingress for instant sub-second connects and snappy replay
-        DesktopAudioStreamer.shared.warmUpStreamingIngress(server: server)
     }
     
     private func setupPopover() {

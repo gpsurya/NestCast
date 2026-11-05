@@ -42,6 +42,10 @@ public final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
         restoreOriginalOutput()
     }
     
+    public func isBlackHoleInstalled() -> Bool {
+        return getDeviceID(named: "BlackHole") != nil
+    }
+    
     public func getDeviceID(named match: String) -> AudioDeviceID? {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -178,9 +182,27 @@ public final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
         defer { lock.unlock() }
         
         let bhID = getDeviceID(named: "BlackHole")
+        let current = getCurrentDefaultOutputDeviceID()
+        
+        // Strict guard: ONLY restore if NestCast actually redirected the output,
+        // or if the current system default is actively set to BlackHole.
+        // This guarantees we never hijack or switch audio on app startup, quit, or duplicate cleanups.
+        guard isRedirectedToBlackHole || (bhID != nil && current == bhID) else {
+            return true
+        }
+        
         var targetID: AudioDeviceID? = originalDeviceID
         
-        // If original device was not saved or is invalid, intelligently select best physical output
+        // If the user already manually changed away from BlackHole while streaming, respect their manual change
+        if let cur = current, cur != bhID {
+            originalDeviceID = nil
+            DispatchQueue.main.async {
+                self.isRedirectedToBlackHole = false
+            }
+            return true
+        }
+        
+        // If original device was not saved or is invalid, select the best physical output
         if targetID == nil || targetID == bhID {
             let availableOutputs = getAllOutputDevices().filter { $0.id != bhID }
             // Prefer internal speakers or headphones

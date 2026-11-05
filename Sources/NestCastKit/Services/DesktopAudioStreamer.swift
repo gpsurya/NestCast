@@ -11,10 +11,12 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
     
     private var soxProcess: Process?
     private var soxPipe: Pipe?
+    private var soxErrPipe: Pipe?
     private var cloudflaredProcess: Process?
-    private var activeSessionToken: UUID?
+    private var activeSessionToken: String?
     private var cachedTunnelURL: String?
     private var isWarmingUp: Bool = false
+    private var hasReceivedFirstAudioChunk: Bool = false
     private let streamQueue = DispatchQueue(label: "com.gpsurya.NestCast.desktopAudioStreamer", qos: .userInteractive)
     private let lock = NSLock()
     
@@ -56,16 +58,21 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         return possiblePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
     
-    /// Pre-warms the zero-trust streaming ingress tunnel in the background on app start
-    /// so that speaker connection and replay are snappy and instantaneous (<0.8s).
-    public func warmUpStreamingIngress(server: AudioStreamServer) {
+    /// Pre-warms the zero-trust streaming ingress tunnel only when explicitly needed or requested
+    public func warmUpStreamingIngress(server: AudioStreamServer, completion: ((String?) -> Void)? = nil) {
         lock.lock()
-        guard cachedTunnelURL == nil && !isWarmingUp else {
+        if let existing = cachedTunnelURL {
+            lock.unlock()
+            completion?(existing)
+            return
+        }
+        guard !isWarmingUp else {
             lock.unlock()
             return
         }
         guard let cfPath = findExecutable(named: "cloudflared") else {
             lock.unlock()
+            completion?(nil)
             return
         }
         isWarmingUp = true
@@ -73,7 +80,7 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         
         streamQueue.async { [weak self] in
             guard let self = self else { return }
-            LogManager.shared.audio("Pre-warming background streaming ingress tunnel on port \(server.port)...")
+            LogManager.shared.audio("Initializing zero-trust fallback ingress tunnel on port \(server.port)...")
             
             let cf = Process()
             cf.executableURL = URL(fileURLWithPath: cfPath)
@@ -110,10 +117,11 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                 self.cloudflaredProcess = cf
                 self.lock.unlock()
             } catch {
-                LogManager.shared.error("DesktopAudioStreamer", "Failed to run cloudflared pre-warm: \(error.localizedDescription)")
+                LogManager.shared.error("DesktopAudioStreamer", "Failed to run cloudflared fallback: \(error.localizedDescription)")
                 self.lock.lock()
                 self.isWarmingUp = false
                 self.lock.unlock()
+                completion?(nil)
                 return
             }
             
@@ -121,7 +129,6 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             cfPipe.fileHandleForReading.readabilityHandler = nil
             
             if waitResult == .success, let baseURL = discoveredURL {
-                // Verify edge reachability in background
                 var isReachable = false
                 for _ in 1...10 {
                     Thread.sleep(forTimeInterval: 0.3)
@@ -146,12 +153,14 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                 self.cachedTunnelURL = baseURL
                 self.isWarmingUp = false
                 self.lock.unlock()
-                LogManager.shared.audio("Streaming ingress pre-warmed & verified: \(baseURL)")
+                LogManager.shared.audio("Zero-trust fallback tunnel verified: \(baseURL)")
+                completion?(baseURL)
             } else {
                 self.lock.lock()
                 self.isWarmingUp = false
                 self.lock.unlock()
-                LogManager.shared.audio("Background tunnel pre-warm completed or timed out")
+                LogManager.shared.audio("Fallback tunnel unavailable or timed out")
+                completion?(nil)
             }
         }
     }
@@ -160,14 +169,19 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         to device: CastDevice,
         server: AudioStreamServer,
         cast: CastProtocol,
+        forceTunnelFallback: Bool = false,
         completion: ((Bool) -> Void)? = nil
     ) {
         stopStreaming()
         
         lock.lock()
-        let sessionToken = UUID()
+        let sessionToken = UUID().uuidString
         self.activeSessionToken = sessionToken
+        self.hasReceivedFirstAudioChunk = false
         lock.unlock()
+        
+        // Register token with local HTTP streaming server
+        server.activeSessionToken = sessionToken
         
         guard let soxPath = findExecutable(named: "sox") else {
             let msg = "SoX not found. Install via: brew install sox"
@@ -190,12 +204,12 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 2. Start SoX Low-Latency 320kbps MP3 Capture (--buffer 1024 = 21.3ms real-time chunk latency)
+        // 2. Start SoX High-Definition 320kbps MP3 Capture with Low-Latency Buffer (--buffer 1024)
         let sox = Process()
         sox.executableURL = URL(fileURLWithPath: soxPath)
         sox.arguments = [
             "-q",
-            "--buffer", "1024",  // Low-latency capture buffer (21.3ms frame chunks)
+            "--buffer", "1024",  // Low-latency capture buffer (~21.3ms frame chunks)
             "-t", "coreaudio", "BlackHole 2ch",
             "-t", "mp3",
             "-C", "320",        // Studio-grade 320kbps CBR
@@ -204,13 +218,37 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         ]
         
         let pipe = Pipe()
+        let errPipe = Pipe()
         sox.standardOutput = pipe
-        sox.standardError = FileHandle.nullDevice
+        sox.standardError = errPipe
         
-        pipe.fileHandleForReading.readabilityHandler = { [weak server] handle in
+        var soxStderrData = Data()
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let errChunk = handle.availableData
+            if !errChunk.isEmpty {
+                soxStderrData.append(errChunk)
+            }
+        }
+        
+        pipe.fileHandleForReading.readabilityHandler = { [weak self, weak server] handle in
             let chunk = handle.availableData
             if !chunk.isEmpty {
+                self?.lock.lock()
+                self?.hasReceivedFirstAudioChunk = true
+                self?.lock.unlock()
                 server?.broadcastLiveChunk(chunk)
+            }
+        }
+        
+        sox.terminationHandler = { [weak self] proc in
+            let exitCode = proc.terminationStatus
+            if exitCode != 0 {
+                let errString = String(data: soxStderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                LogManager.shared.error("DesktopAudioStreamer", "SoX terminated with code \(exitCode): \(errString)")
+                DispatchQueue.main.async {
+                    self?.statusText = "Audio capture engine stopped (\(exitCode))"
+                    self?.stopStreaming()
+                }
             }
         }
         
@@ -219,8 +257,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             lock.lock()
             self.soxProcess = sox
             self.soxPipe = pipe
+            self.soxErrPipe = errPipe
             lock.unlock()
-            LogManager.shared.audio("Ultra-low latency 320kbps @ 48kHz SoX desktop capture running")
+            LogManager.shared.audio("320kbps @ 48kHz SoX desktop capture running")
         } catch {
             LogManager.shared.error("DesktopAudioStreamer", "Failed to start SoX: \(error.localizedDescription)")
             stopStreaming()
@@ -228,11 +267,27 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 3. Resolve Stream URL
-        let localIP = AudioStreamServer.getWiFiIP(matchingSubnetOf: device.ipAddress) ?? server.localIP
-        let directLANURL = "http://\(localIP):\(server.port)/live.mp3"
+        // 3. First-chunk watchdog timer (3.5s)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            let received = self.hasReceivedFirstAudioChunk
+            let stillStreaming = self.isStreaming || self.activeSessionToken == sessionToken
+            self.lock.unlock()
+            
+            if stillStreaming && !received {
+                LogManager.shared.error("DesktopAudioStreamer", "Watchdog: No audio chunks received from BlackHole within 3.5s")
+                self.statusText = "No audio received from audio driver"
+                self.stopStreaming()
+                completion?(false)
+            }
+        }
         
-        func proceedWithStream(url: String, isTunnel: Bool) {
+        // 4. Resolve Stream URL: DIRECT WI-FI LAN IS ALWAYS THE PRIMARY DEFAULT
+        let localIP = AudioStreamServer.getWiFiIP(matchingSubnetOf: device.ipAddress) ?? server.localIP
+        let directLANURL = "http://\(localIP):\(server.port)/live.mp3?token=\(sessionToken)"
+        
+        func dispatchToSpeaker(url: String, isTunnel: Bool) {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.lock.lock()
@@ -242,12 +297,11 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                 }
                 self.currentStreamURL = url
                 self.isStreaming = true
-                self.statusText = isTunnel ? "Streaming Hi-Fi 320k to \(device.name)" : "Streaming Hi-Fi 320k to \(device.name)"
+                self.statusText = isTunnel ? "Streaming Hi-Fi 320k (Tunnel Fallback) to \(device.name)" : "Streaming Hi-Fi 320k to \(device.name)"
                 self.lock.unlock()
                 
                 LogManager.shared.cast("Dispatching stream URL to \(device.name): \(url) (tunnel: \(isTunnel))")
                 
-                // Connect to Cast device and launch Default Media Receiver
                 cast.connect(to: device) { [weak self] success in
                     guard let self = self else { return }
                     self.lock.lock()
@@ -258,7 +312,7 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                     self.lock.unlock()
                     
                     if success {
-                        cast.launchAndLoad(streamURL: url, streamType: "LIVE", title: "Mac Desktop Audio (Hi-Fi 320k)") { [weak self] loadSuccess in
+                        cast.launchAndLoad(streamURL: url, streamType: "LIVE", title: "Mac Desktop Audio") { [weak self] loadSuccess in
                             guard let self = self else { return }
                             self.lock.lock()
                             guard self.activeSessionToken == sessionToken else {
@@ -268,12 +322,27 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                             self.lock.unlock()
                             
                             if loadSuccess {
-                                LogManager.shared.cast("Live stream loaded successfully on \(device.name)")
+                                LogManager.shared.cast("Live stream playing successfully on \(device.name)")
                                 completion?(true)
                             } else {
-                                LogManager.shared.error("DesktopAudioStreamer", "Failed to load media stream on speaker")
-                                self.stopStreaming()
-                                completion?(false)
+                                // If direct LAN failed and we haven't tried tunnel fallback yet, diagnose and attempt fallback
+                                if !isTunnel && self.findExecutable(named: "cloudflared") != nil {
+                                    LogManager.shared.audio("Direct LAN load failed (possibly corporate firewall/packet filter). Attempting zero-trust fallback...")
+                                    self.warmUpStreamingIngress(server: server) { tunnelURL in
+                                        guard let tURL = tunnelURL else {
+                                            LogManager.shared.error("DesktopAudioStreamer", "Tunnel fallback unavailable. Stopping stream.")
+                                            self.stopStreaming()
+                                            completion?(false)
+                                            return
+                                        }
+                                        let secureTunnelURL = "\(tURL)/live.mp3?token=\(sessionToken)"
+                                        dispatchToSpeaker(url: secureTunnelURL, isTunnel: true)
+                                    }
+                                } else {
+                                    LogManager.shared.error("DesktopAudioStreamer", "Failed to load media stream on speaker")
+                                    self.stopStreaming()
+                                    completion?(false)
+                                }
                             }
                         }
                     } else {
@@ -285,62 +354,46 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             }
         }
         
-        // Instant stream start if tunnel is pre-warmed
-        lock.lock()
-        let preWarmed = cachedTunnelURL
-        lock.unlock()
-        
-        if let warmBaseURL = preWarmed {
-            proceedWithStream(url: "\(warmBaseURL)/live.mp3", isTunnel: true)
-            return
-        }
-        
-        // If not pre-warmed yet, check if cloudflared is present and warm it up on demand
-        if findExecutable(named: "cloudflared") != nil {
-            warmUpStreamingIngress(server: server)
-            streamQueue.async { [weak self] in
-                guard let self = self else { return }
-                // Quick poll for pre-warmed tunnel (up to 3.5s)
-                for _ in 1...14 {
-                    Thread.sleep(forTimeInterval: 0.25)
-                    self.lock.lock()
-                    let readyURL = self.cachedTunnelURL
-                    self.lock.unlock()
-                    if let ready = readyURL {
-                        proceedWithStream(url: "\(ready)/live.mp3", isTunnel: true)
-                        return
-                    }
+        if forceTunnelFallback {
+            warmUpStreamingIngress(server: server) { tunnelURL in
+                if let tURL = tunnelURL {
+                    dispatchToSpeaker(url: "\(tURL)/live.mp3?token=\(sessionToken)", isTunnel: true)
+                } else {
+                    dispatchToSpeaker(url: directLANURL, isTunnel: false)
                 }
-                LogManager.shared.audio("Tunnel not ready in time, falling back to direct Wi-Fi URL: \(directLANURL)")
-                proceedWithStream(url: directLANURL, isTunnel: false)
             }
         } else {
-            proceedWithStream(url: directLANURL, isTunnel: false)
+            // Direct LAN first!
+            dispatchToSpeaker(url: directLANURL, isTunnel: false)
         }
     }
     
     public func stopStreaming() {
         lock.lock()
         activeSessionToken = nil
+        hasReceivedFirstAudioChunk = false
         
-        // Clear readabilityHandler immediately to halt piping
         soxPipe?.fileHandleForReading.readabilityHandler = nil
         soxPipe = nil
         
+        soxErrPipe?.fileHandleForReading.readabilityHandler = nil
+        soxErrPipe = nil
+        
+        soxProcess?.terminationHandler = nil
         soxProcess?.terminate()
         soxProcess = nil
-        // Note: cloudflaredProcess is intentionally NOT terminated here to keep the ingress warm for instant replay
         lock.unlock()
         
         // Immediately restore macOS audio output to Mac speakers
         AudioDeviceManager.shared.restoreOriginalOutput()
         AudioStreamServer.sharedInstance?.closeLiveConnections()
+        AudioStreamServer.sharedInstance?.activeSessionToken = nil
         
         DispatchQueue.main.async {
             self.isStreaming = false
             self.currentStreamURL = nil
             self.statusText = ""
         }
-        LogManager.shared.audio("Desktop audio streaming stopped and output restored instantly")
+        LogManager.shared.audio("Desktop audio streaming stopped and output restored")
     }
 }
