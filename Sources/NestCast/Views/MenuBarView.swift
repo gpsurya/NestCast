@@ -118,7 +118,7 @@ public struct MenuBarView: View {
             
             // Footer
             HStack {
-                Text("v1.0.2 • gpsurya")
+                Text("v1.0.3 • gpsurya")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
                 

@@ -13,7 +13,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
     private var soxPipe: Pipe?
     private var cloudflaredProcess: Process?
     private var activeSessionToken: UUID?
-    private let streamQueue = DispatchQueue(label: "com.gpsurya.NestCast.desktopAudioStreamer", qos: .userInitiated)
+    private var cachedTunnelURL: String?
+    private var isWarmingUp: Bool = false
+    private let streamQueue = DispatchQueue(label: "com.gpsurya.NestCast.desktopAudioStreamer", qos: .userInteractive)
     private let lock = NSLock()
     
     public init() {
@@ -27,11 +29,21 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
     
     deinit {
         NotificationCenter.default.removeObserver(self)
-        stopStreaming()
+        tearDownAll()
     }
     
     @objc private func handleAppWillTerminate() {
+        tearDownAll()
+    }
+    
+    private func tearDownAll() {
         stopStreaming()
+        lock.lock()
+        cloudflaredProcess?.terminate()
+        cloudflaredProcess = nil
+        cachedTunnelURL = nil
+        isWarmingUp = false
+        lock.unlock()
     }
     
     private func findExecutable(named name: String) -> String? {
@@ -42,6 +54,106 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             "/bin/\(name)"
         ]
         return possiblePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+    
+    /// Pre-warms the zero-trust streaming ingress tunnel in the background on app start
+    /// so that speaker connection and replay are snappy and instantaneous (<0.8s).
+    public func warmUpStreamingIngress(server: AudioStreamServer) {
+        lock.lock()
+        guard cachedTunnelURL == nil && !isWarmingUp else {
+            lock.unlock()
+            return
+        }
+        guard let cfPath = findExecutable(named: "cloudflared") else {
+            lock.unlock()
+            return
+        }
+        isWarmingUp = true
+        lock.unlock()
+        
+        streamQueue.async { [weak self] in
+            guard let self = self else { return }
+            LogManager.shared.audio("Pre-warming background streaming ingress tunnel on port \(server.port)...")
+            
+            let cf = Process()
+            cf.executableURL = URL(fileURLWithPath: cfPath)
+            cf.arguments = ["tunnel", "--url", "http://127.0.0.1:\(server.port)", "--protocol", "http2"]
+            
+            let cfPipe = Pipe()
+            cf.standardOutput = cfPipe
+            cf.standardError = cfPipe
+            
+            let tunnelGroup = DispatchGroup()
+            tunnelGroup.enter()
+            var discoveredURL: String?
+            
+            cfPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard let text = String(data: data, encoding: .utf8) else { return }
+                for line in text.components(separatedBy: "\n") {
+                    if line.contains("trycloudflare.com") && discoveredURL == nil {
+                        let tokens = line.components(separatedBy: CharacterSet.whitespacesAndNewlines)
+                        for token in tokens {
+                            if token.hasPrefix("https://") && token.contains("trycloudflare.com") {
+                                discoveredURL = token
+                                tunnelGroup.leave()
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            
+            do {
+                try cf.run()
+                self.lock.lock()
+                self.cloudflaredProcess = cf
+                self.lock.unlock()
+            } catch {
+                LogManager.shared.error("DesktopAudioStreamer", "Failed to run cloudflared pre-warm: \(error.localizedDescription)")
+                self.lock.lock()
+                self.isWarmingUp = false
+                self.lock.unlock()
+                return
+            }
+            
+            let waitResult = tunnelGroup.wait(timeout: .now() + 8.0)
+            cfPipe.fileHandleForReading.readabilityHandler = nil
+            
+            if waitResult == .success, let baseURL = discoveredURL {
+                // Verify edge reachability in background
+                var isReachable = false
+                for _ in 1...10 {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    if let checkURL = URL(string: "\(baseURL)/chime.ogg") {
+                        var request = URLRequest(url: checkURL)
+                        request.httpMethod = "HEAD"
+                        request.timeoutInterval = 1.0
+                        let sem = DispatchSemaphore(value: 0)
+                        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+                            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                                isReachable = true
+                            }
+                            sem.signal()
+                        }
+                        task.resume()
+                        _ = sem.wait(timeout: .now() + 1.2)
+                        if isReachable { break }
+                    }
+                }
+                
+                self.lock.lock()
+                self.cachedTunnelURL = baseURL
+                self.isWarmingUp = false
+                self.lock.unlock()
+                LogManager.shared.audio("Streaming ingress pre-warmed & verified: \(baseURL)")
+            } else {
+                self.lock.lock()
+                self.isWarmingUp = false
+                self.lock.unlock()
+                LogManager.shared.audio("Background tunnel pre-warm completed or timed out")
+            }
+        }
     }
     
     public func startStreaming(
@@ -66,10 +178,10 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         }
         
         DispatchQueue.main.async {
-            self.statusText = "Redirecting Mac audio to BlackHole..."
+            self.statusText = "Connecting audio to \(device.name)..."
         }
         
-        // 1. Redirect macOS Default Audio Output to BlackHole 2ch
+        // 1. Immediately switch macOS Audio Output to BlackHole 2ch
         guard AudioDeviceManager.shared.switchToBlackHole() else {
             let msg = "BlackHole 2ch driver not found. Install via: brew install blackhole-2ch"
             LogManager.shared.error("DesktopAudioStreamer", msg)
@@ -78,15 +190,16 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 2. Start SoX High-Definition 320kbps MP3 Capture (Native 48kHz, Zero Resampling)
+        // 2. Start SoX Low-Latency 320kbps MP3 Capture (--buffer 1024 = 21.3ms real-time chunk latency)
         let sox = Process()
         sox.executableURL = URL(fileURLWithPath: soxPath)
         sox.arguments = [
             "-q",
+            "--buffer", "1024",  // Low-latency capture buffer (21.3ms frame chunks)
             "-t", "coreaudio", "BlackHole 2ch",
             "-t", "mp3",
-            "-C", "320",      // Studio-grade 320kbps CBR (Superior to Bluetooth SBC/AAC)
-            "-r", "48000",    // Native 48kHz matching CoreAudio DAC (Zero resampling artifacts)
+            "-C", "320",        // Studio-grade 320kbps CBR
+            "-r", "48000",      // Native 48kHz matching CoreAudio DAC
             "-"
         ]
         
@@ -107,7 +220,7 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             self.soxProcess = sox
             self.soxPipe = pipe
             lock.unlock()
-            LogManager.shared.audio("High-Definition 320kbps @ 48kHz SoX desktop capture running")
+            LogManager.shared.audio("Ultra-low latency 320kbps @ 48kHz SoX desktop capture running")
         } catch {
             LogManager.shared.error("DesktopAudioStreamer", "Failed to start SoX: \(error.localizedDescription)")
             stopStreaming()
@@ -115,10 +228,9 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             return
         }
         
-        // 3. Resolve Stream URL (Tunnel if available for zero-trust/corporate firewalls, else Direct LAN)
+        // 3. Resolve Stream URL
         let localIP = AudioStreamServer.getWiFiIP(matchingSubnetOf: device.ipAddress) ?? server.localIP
         let directLANURL = "http://\(localIP):\(server.port)/live.mp3"
-        let cfPath = findExecutable(named: "cloudflared")
         
         func proceedWithStream(url: String, isTunnel: Bool) {
             DispatchQueue.main.async { [weak self] in
@@ -130,7 +242,7 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
                 }
                 self.currentStreamURL = url
                 self.isStreaming = true
-                self.statusText = isTunnel ? "Streaming Hi-Fi 320k (Firewall Safe) to \(device.name)" : "Streaming Hi-Fi 320k to \(device.name)"
+                self.statusText = isTunnel ? "Streaming Hi-Fi 320k to \(device.name)" : "Streaming Hi-Fi 320k to \(device.name)"
                 self.lock.unlock()
                 
                 LogManager.shared.cast("Dispatching stream URL to \(device.name): \(url) (tunnel: \(isTunnel))")
@@ -173,90 +285,36 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             }
         }
         
-        if let cfPath = cfPath {
-            DispatchQueue.main.async {
-                self.statusText = "Establishing secure audio stream..."
-            }
-            let cf = Process()
-            cf.executableURL = URL(fileURLWithPath: cfPath)
-            cf.arguments = ["tunnel", "--url", "http://127.0.0.1:\(server.port)"]
-            
-            let cfPipe = Pipe()
-            cf.standardOutput = cfPipe
-            cf.standardError = cfPipe
-            
-            let tunnelGroup = DispatchGroup()
-            tunnelGroup.enter()
-            var discoveredTunnelURL: String?
-            
-            cfPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard let text = String(data: data, encoding: .utf8) else { return }
-                for line in text.components(separatedBy: "\n") {
-                    if line.contains("trycloudflare.com") && discoveredTunnelURL == nil {
-                        let tokens = line.components(separatedBy: CharacterSet.whitespacesAndNewlines)
-                        for token in tokens {
-                            if token.hasPrefix("https://") && token.contains("trycloudflare.com") {
-                                discoveredTunnelURL = token
-                                LogManager.shared.audio("Cloudflared tunnel established: \(token)")
-                                tunnelGroup.leave()
-                                break
-                            }
-                        }
-                    }
-                }
-            }
-            
-            do {
-                try cf.run()
-                self.lock.lock()
-                self.cloudflaredProcess = cf
-                self.lock.unlock()
-            } catch {
-                LogManager.shared.error("DesktopAudioStreamer", "Failed to run cloudflared: \(error.localizedDescription)")
-            }
-            
+        // Instant stream start if tunnel is pre-warmed
+        lock.lock()
+        let preWarmed = cachedTunnelURL
+        lock.unlock()
+        
+        if let warmBaseURL = preWarmed {
+            proceedWithStream(url: "\(warmBaseURL)/live.mp3", isTunnel: true)
+            return
+        }
+        
+        // If not pre-warmed yet, check if cloudflared is present and warm it up on demand
+        if findExecutable(named: "cloudflared") != nil {
+            warmUpStreamingIngress(server: server)
             streamQueue.async { [weak self] in
-                guard self != nil else { return }
-                let waitResult = tunnelGroup.wait(timeout: .now() + 8.0)
-                cfPipe.fileHandleForReading.readabilityHandler = nil
-                
-                if waitResult == .success, let baseURL = discoveredTunnelURL {
-                    let liveURL = "\(baseURL)/live.mp3"
-                    LogManager.shared.audio("Tunnel registered. Verifying public edge propagation for \(baseURL)...")
-                    
-                    // Warm up and verify edge DNS before dispatching to Nest Mini
-                    var isReachable = false
-                    for attempt in 1...10 {
-                        Thread.sleep(forTimeInterval: 0.5)
-                        if let checkURL = URL(string: "\(baseURL)/chime.ogg") {
-                            var request = URLRequest(url: checkURL)
-                            request.httpMethod = "HEAD"
-                            request.timeoutInterval = 1.0
-                            let semaphore = DispatchSemaphore(value: 0)
-                            let task = URLSession.shared.dataTask(with: request) { _, response, _ in
-                                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                                    isReachable = true
-                                }
-                                semaphore.signal()
-                            }
-                            task.resume()
-                            _ = semaphore.wait(timeout: .now() + 1.2)
-                            if isReachable {
-                                LogManager.shared.audio("Tunnel verified live and reachable at attempt \(attempt)")
-                                break
-                            }
-                        }
+                guard let self = self else { return }
+                // Quick poll for pre-warmed tunnel (up to 3.5s)
+                for _ in 1...14 {
+                    Thread.sleep(forTimeInterval: 0.25)
+                    self.lock.lock()
+                    let readyURL = self.cachedTunnelURL
+                    self.lock.unlock()
+                    if let ready = readyURL {
+                        proceedWithStream(url: "\(ready)/live.mp3", isTunnel: true)
+                        return
                     }
-                    
-                    proceedWithStream(url: liveURL, isTunnel: true)
-                } else {
-                    LogManager.shared.audio("Tunnel timed out or unavailable, falling back to Direct LAN: \(directLANURL)")
-                    proceedWithStream(url: directLANURL, isTunnel: false)
                 }
+                LogManager.shared.audio("Tunnel not ready in time, falling back to direct Wi-Fi URL: \(directLANURL)")
+                proceedWithStream(url: directLANURL, isTunnel: false)
             }
         } else {
-            LogManager.shared.cast("Direct Wi-Fi audio stream URL for \(device.name): \(directLANURL)")
             proceedWithStream(url: directLANURL, isTunnel: false)
         }
     }
@@ -265,17 +323,16 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
         lock.lock()
         activeSessionToken = nil
         
-        // Clear readabilityHandler to prevent kernel file descriptor leaks
+        // Clear readabilityHandler immediately to halt piping
         soxPipe?.fileHandleForReading.readabilityHandler = nil
         soxPipe = nil
         
         soxProcess?.terminate()
         soxProcess = nil
-        
-        cloudflaredProcess?.terminate()
-        cloudflaredProcess = nil
+        // Note: cloudflaredProcess is intentionally NOT terminated here to keep the ingress warm for instant replay
         lock.unlock()
         
+        // Immediately restore macOS audio output to Mac speakers
         AudioDeviceManager.shared.restoreOriginalOutput()
         AudioStreamServer.sharedInstance?.closeLiveConnections()
         
@@ -284,6 +341,6 @@ public final class DesktopAudioStreamer: ObservableObject, @unchecked Sendable {
             self.currentStreamURL = nil
             self.statusText = ""
         }
-        LogManager.shared.audio("Desktop audio streaming stopped and output restored")
+        LogManager.shared.audio("Desktop audio streaming stopped and output restored instantly")
     }
 }

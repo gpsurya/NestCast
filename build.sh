@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 APP_NAME="NestCast"
 BUNDLE_ID="com.gpsurya.NestCast"
-VERSION="${VERSION:-1.0.2}"
+VERSION="${VERSION:-1.0.3}"
 ARCH=$(uname -m)
 BUILD_DIR="${NESTCAST_BUILD_DIR:-$(pwd)/build}"
 APP="$BUILD_DIR/$APP_NAME.app"

@@ -10,7 +10,7 @@ func assertTest(_ condition: Bool, _ message: String) {
 }
 
 print("======================================================")
-print("  Running NestCast Comprehensive Test Suite (v1.0.1)")
+print("  Running NestCast Comprehensive Test Suite (v1.0.3)")
 print("======================================================\n")
 
 // ──────────────────────────────────────────────────────────

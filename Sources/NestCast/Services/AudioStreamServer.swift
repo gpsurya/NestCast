@@ -9,7 +9,7 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
     @Published public var port: UInt16 = 8088
     
     private var listener: NWListener?
-    private let audioQueue = DispatchQueue(label: "com.gpsurya.NestCast.audioServer", qos: .userInitiated)
+    private let audioQueue = DispatchQueue(label: "com.gpsurya.NestCast.audioServer", qos: .userInteractive)
     private var chimeWavData: Data
     private var chimeOggData: Data
     
@@ -65,7 +65,10 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
         let currentIP = Self.getWiFiIP() ?? "127.0.0.1"
         
         do {
-            let params = NWParameters.tcp
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.noDelay = true // Disable Nagle's algorithm for near-zero network latency
+            tcpOptions.enableKeepalive = true
+            let params = NWParameters(tls: nil, tcp: tcpOptions)
             params.allowLocalEndpointReuse = true
             let newListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
             
@@ -192,8 +195,9 @@ public final class AudioStreamServer: ObservableObject, @unchecked Sendable {
                     "Access-Control-Allow-Origin: *",
                     "Access-Control-Allow-Private-Network: true",
                     "Accept-Ranges: none",
-                    "Cache-Control: no-cache, no-store",
+                    "Cache-Control: no-cache, no-store, must-revalidate",
                     "Pragma: no-cache",
+                    "Expires: 0",
                     "Connection: keep-alive",
                     "",
                     ""

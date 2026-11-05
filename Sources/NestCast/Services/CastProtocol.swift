@@ -24,6 +24,7 @@ public class CastProtocol: ObservableObject {
     private var heartbeatTimer: Timer?
     private var volumeDebounceTimer: Timer?
     private var volumeSettleTimer: Timer?
+    private var onReceiverReady: ((String) -> Void)?
     
     private var requestId: Int = 1
     private let reqLock = NSLock()
@@ -100,8 +101,8 @@ public class CastProtocol: ObservableObject {
         conn.start(queue: .main)
     }
     
-    public func disconnect() {
-        LogManager.shared.cast("Disconnecting active Cast session")
+    public func disconnect(completion: (() -> Void)? = nil) {
+        LogManager.shared.cast("Disconnecting active Cast session instantly")
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         volumeDebounceTimer?.invalidate()
@@ -109,18 +110,31 @@ public class CastProtocol: ObservableObject {
         volumeSettleTimer?.invalidate()
         volumeSettleTimer = nil
         isAdjustingVolume = false
+        onReceiverReady = nil
         
-        if let transportId = currentTransportId {
-            sendStop(transportId: transportId)
+        let conn = self.connection
+        let transId = self.currentTransportId
+        
+        // Immediately notify speaker hardware to halt playback and drop media buffers
+        if let transportId = transId {
+            sendStop(destination: transportId)
+            sendClose(destination: transportId)
         }
+        sendStop(destination: "receiver-0")
+        sendClose(destination: "receiver-0")
         
-        connection?.cancel()
-        connection = nil
-        currentTransportId = nil
-        currentSessionId = nil
-        activeDevice = nil
-        tcpBuffer.removeAll()
-        state = .disconnected
+        self.connection = nil
+        self.currentTransportId = nil
+        self.currentSessionId = nil
+        self.activeDevice = nil
+        self.tcpBuffer.removeAll()
+        self.state = .disconnected
+        
+        // Give 120ms for STOP and CLOSE packets to flush through TLS socket before cancellation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            conn?.cancel()
+            completion?()
+        }
     }
     
     public func setVolume(level: Float) {
@@ -173,6 +187,17 @@ public class CastProtocol: ObservableObject {
         self.currentTransportId = nil
         self.currentSessionId = nil
         
+        let dispatchLoad = { [weak self] (transportId: String) in
+            guard let self = self else { return }
+            LogManager.shared.cast("Receiver ready (transportId=\(transportId)). Dispatching CONNECT and LOAD immediately...")
+            self.sendConnect(destination: transportId)
+            self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title)
+            self.state = .playing
+            completion?(true)
+        }
+        
+        self.onReceiverReady = dispatchLoad
+        
         LogManager.shared.cast("Launching Default Media Receiver (CC1AD845)...")
         let payload: [String: Any] = [
             "type": "LAUNCH",
@@ -182,23 +207,17 @@ public class CastProtocol: ObservableObject {
         
         sendJson(destination: "receiver-0", ns: "urn:x-cast:com.google.cast.receiver", dict: payload)
         
+        // Safety timeout fallback (6s) in case network packets are dropped
         Task {
-            for attempt in 1...30 {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                if let transportId = self.currentTransportId {
-                    LogManager.shared.cast("Receiver ready (transportId=\(transportId), attempt=\(attempt)). Sending CONNECT and LOAD...")
-                    self.sendConnect(destination: transportId)
-                    self.loadMedia(transportId: transportId, streamURL: streamURL, streamType: streamType, title: title)
-                    self.state = .playing
-                    completion?(true)
-                    return
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if self.onReceiverReady != nil {
+                self.onReceiverReady = nil
+                if self.currentTransportId == nil {
+                    let timeoutMsg = "Timed out waiting for Media Receiver launch"
+                    LogManager.shared.error("CastProtocol", timeoutMsg)
+                    self.state = .error(timeoutMsg)
+                    completion?(false)
                 }
-            }
-            if self.currentTransportId == nil {
-                let timeoutMsg = "Timed out waiting for Media Receiver launch"
-                LogManager.shared.error("CastProtocol", timeoutMsg)
-                self.state = .error(timeoutMsg)
-                completion?(false)
             }
         }
     }
@@ -251,11 +270,15 @@ public class CastProtocol: ObservableObject {
         sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.tp.connection", dict: ["type": "CONNECT"])
     }
     
-    private func sendStop(transportId: String) {
-        sendJson(destination: transportId, ns: "urn:x-cast:com.google.cast.media", dict: [
+    private func sendStop(destination: String) {
+        sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.media", dict: [
             "type": "STOP",
             "requestId": nextRequestId()
         ])
+    }
+    
+    private func sendClose(destination: String) {
+        sendJson(destination: destination, ns: "urn:x-cast:com.google.cast.tp.connection", dict: ["type": "CLOSE"])
     }
     
     private func startHeartbeat() {
@@ -369,6 +392,10 @@ public class CastProtocol: ObservableObject {
                let firstApp = apps.first {
                 if let transportId = firstApp["transportId"] as? String {
                     self.currentTransportId = transportId
+                    if let callback = self.onReceiverReady {
+                        self.onReceiverReady = nil
+                        callback(transportId)
+                    }
                 }
                 if let sessionId = firstApp["sessionId"] as? String {
                     self.currentSessionId = sessionId
